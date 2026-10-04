@@ -4,7 +4,7 @@ import type { On } from 'claude-code'
 
 import type { Persona } from '../types'
 import { CHIME_OFF, CHIME_ON } from '../hooks/chime'
-import { bestVoice, foreignWords, parseGenerated, parseSayVoices, pickOption, speakable, spoken, stripEcho } from '../hooks/persona'
+import { bestVoice, foreignWords, parseGenerated, parseSayVoices, pickOption, pickVoice, speakable, spoken, stripEcho } from '../hooks/persona'
 
 const USAGE = { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
 
@@ -30,7 +30,7 @@ const BAND = {
  * Speech stays "in progress" until the test ends it or the mod hushes it. The microphone
  * waits for the test to `hear` something; `pkill` from the mod ends a pending listen.
  */
-function boot(on: On, seed: Record<string, unknown> = {}, sayVoices = 'Samantha             en_US    # Hello\nDaniel               en_GB    # Hello') {
+function boot(on: On, seed: Record<string, unknown> = {}, sayVoices = 'Samantha             en_US    # Hello\nDaniel               en_GB    # Hello', swiftcError = '') {
   const saved = new Map<string, unknown>(Object.entries(seed))
   const spokenTexts: string[] = []
   const spokenVoices: string[] = []
@@ -55,6 +55,7 @@ function boot(on: On, seed: Record<string, unknown> = {}, sayVoices = 'Samantha 
     return { value: undefined }
   })
   on('session.start', () => ({ cwd: '/work' }))
+  on('session.id', () => ({ value: 'sess-1' }))
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: '' }))
   on('turn.abort', ($, e) => {
@@ -102,6 +103,7 @@ function boot(on: On, seed: Record<string, unknown> = {}, sayVoices = 'Samantha 
     runs.push(cmd)
     if (cmd === 'killall say') finishSpeech()
     if (e.argv[0] === 'pkill') feed(CANCEL)
+    if (e.argv[0] === 'swiftc' && swiftcError) return { value: { exitCode: 1, stdout: '', stderr: swiftcError, isStdoutTruncated: false, isStderrTruncated: false } }
     return { value: { exitCode: 0, stdout: cmd === 'say -v ?' ? sayVoices : '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('process.spawn', async function* () {
@@ -146,7 +148,7 @@ test('/sidekick new creates a persona, activates it and chimes', async ($, on) =
 })
 
 test('a finished turn is spoken short, in the persona voice, unless muted', async ($, on) => {
-  const { spokenTexts, spokenVoices, finishSpeech } = boot(on, { active: 'rudy' })
+  const { spokenTexts, spokenVoices, finishSpeech, saved } = boot(on, { active: 'rudy' })
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
 
   const essay = 'Fixed the **build**. Then I rewrote three files. Then I ran the tests.\n\nMore paragraphs here.\n\n```sh\nmake\n```'
@@ -159,9 +161,73 @@ test('a finished turn is spoken short, in the persona voice, unless muted', asyn
   await settle(() => false)
 
   await run($, 'mute')
+  // "mute" twice stays muted: it is a verb, not a toggle
+  await run($, 'mute')
   await $.turn.complete({ turnId: 't2', answer: 'Silence.', durationMs: 10, isAborted: false, reason: 'answer' })
   await settle(() => false)
   expect(spokenTexts).toEqual(['Fixed the build.'])
+  expect(saved.get('isMuted')).toBeUndefined()
+})
+
+test('a headless run (claude -p) stays plain Claude: nothing loads, nothing is spoken', async ($, on) => {
+  const { spokenTexts, saved } = boot(on, { active: 'rudy' })
+  await $.session.start({ surface: null, isInteractive: false, cwd: '/work' })
+  await $.turn.complete({ turnId: 't1', answer: 'Done.', durationMs: 10, isAborted: false, reason: 'answer' })
+  await settle(() => false)
+  expect(spokenTexts).toEqual([])
+  expect(saved.get('personas')).toBeUndefined()
+})
+
+test('removing or switching off the active sidekick ends talk mode, so the microphone never stays open unseen', async ($, on) => {
+  const { plays, submitted, hear, spawnCount } = boot(on, { active: 'rudy' })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await run($, 'talk')
+  await settle(() => spawnCount() === 1)
+  expect((await run($, 'rm Rudy')).text).toBe('Removed 🦊 Rudy.')
+  await settle(() => plays.length === 2)
+  expect(plays).toEqual(['chime', 'chime-off'])
+  hear('hello are you there')
+  await settle(() => false)
+  expect(submitted).toEqual([])
+  expect(spawnCount()).toBe(1)
+})
+
+test('/sidekick talk on a Mac that cannot build the listener says why, instead of announcing talk mode', async ($, on) => {
+  const { plays, spawnCount } = boot(on, { active: 'rudy' }, undefined, 'xcrun: error: unable to find utility "swiftc"; run xcode-select --install')
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  const answer = await run($, 'talk')
+  expect(answer.text).toContain('Xcode Command Line Tools')
+  expect(answer.text).not.toContain('Talk mode on')
+  await settle(() => false)
+  expect(plays).toEqual([])
+  expect(spawnCount()).toBe(0)
+})
+
+test('a listener that keeps quitting ends talk mode with the reason, instead of spinning', async ($, on) => {
+  const { plays, hear, clock, spawnCount } = boot(on, { active: 'rudy' })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await run($, 'talk')
+  for (let round = 1; round <= 3; round++) {
+    await settle(() => spawnCount() === round)
+    hear('')
+    await settle(() => false)
+    await clock.advance(1000)
+  }
+  await settle(() => plays.length === 2)
+  expect(plays).toEqual(['chime', 'chime-off'])
+  expect(spawnCount()).toBe(3)
+})
+
+test('the roster honors removing everyone, and a second sidekick with a taken name gets a visible number', async ($, on) => {
+  const { saved } = boot(on, { personas: [] })
+  on('model.complete', () => ({ value: { isAnswered: true, text: JSON.stringify({ ...NOVA, name: 'Nova' }), usage: USAGE } }))
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  expect((await run($, 'list')).text).toBe('')
+  await run($, 'new Nova')
+  expect((await run($, 'new another Nova')).text).toContain('🚀 Nova 2 is ready')
+  expect((saved.get('personas') as Persona[]).map(p => p.name)).toEqual(['Nova', 'Nova 2'])
+  expect((await run($, 'use Nova 2')).text).toBe('🚀 Nova 2 is driving now.')
+  await settle(() => false)
 })
 
 test('talk mode: chime, you speak, it sends; its echo is ignored; you talk over it, it stops; "end talk" ends', async ($, on) => {
@@ -245,17 +311,24 @@ test('"stop" while it works aborts the turn instead of queuing a prompt', async 
   await settle(() => spawnCount() === 1)
   finishSpeech()
 
+  // idle, a sentence that happens to start with "stop" is a prompt
+  hear('stop the dev server on port 3000')
+  await settle(() => submitted.length === 1)
+  expect(submitted[0]?.text).toBe('stop the dev server on port 3000')
+  expect(aborted).toEqual([])
+
+  await settle(() => spawnCount() === 2)
   await $.turn.start({ text: 'do the thing', turnId: 'turn-9' })
   hear('stop stop')
   await settle(() => aborted.length === 1)
   expect(aborted).toEqual(['turn-9'])
-  expect(submitted).toEqual([])
+  expect(submitted.length).toBe(1)
 
   // talking while it works queues the next prompt
-  await settle(() => spawnCount() === 2)
+  await settle(() => spawnCount() === 3)
   hear('also check the logs')
-  await settle(() => submitted.length === 1)
-  expect(submitted[0]?.text).toBe('also check the logs')
+  await settle(() => submitted.length === 2)
+  expect(submitted[1]?.text).toBe('also check the logs')
   await run($, 'talk')
   await settle(() => false)
 })
@@ -304,14 +377,23 @@ test('in talk mode a question is asked and answered by voice', async ($, on) => 
   const out = await asking
   expect(out).toMatchObject({ result: { answers: { 'Deploy where?': 'Production' } } })
 
+  // the option's own name, though every option was just spoken, is an answer and not an echo
+  const oneWord = $.tool.call({
+    tool: 'AskUserQuestion',
+    questions: [{ question: 'Deploy where?', header: 'Target', options: [{ label: 'Staging', description: '' }, { label: 'Production', description: '' }], multiSelect: false }],
+  })
+  await settle(() => spawnCount() === 4)
+  hear('production')
+  expect(await oneWord).toMatchObject({ result: { answers: { 'Deploy where?': 'Production' } } })
+
   // nothing understood twice: the dialog takes over
   const fallback = $.tool.call({
     tool: 'AskUserQuestion',
     questions: [{ question: 'Which?', header: 'Pick', options: [{ label: 'Alpha', description: '' }, { label: 'Beta', description: '' }], multiSelect: false }],
   })
-  await settle(() => spawnCount() === 4)
-  hear('')
   await settle(() => spawnCount() === 5)
+  hear('')
+  await settle(() => spawnCount() === 6)
   hear('')
   expect(await fallback).toEqual({ result: 'the dialog was shown' })
   expect(submitted.length).toBe(1)
@@ -333,7 +415,7 @@ test('a downloaded natural voice is used as soon as it is installed', async ($, 
 })
 
 test('/sidekick voice gives a persona a voice, and it sticks across loads', async ($, on) => {
-  const { saved, spokenVoices, spokenTexts, finishSpeech } = boot(on, { active: 'rudy' }, 'Ava (Premium)        en_US    # Hello\nTom (Enhanced)       en_US    # Hello\nSamantha             en_US    # Hello')
+  const { saved, spokenVoices, spokenTexts, finishSpeech } = boot(on, { active: 'rudy' }, 'Ava (Premium)        en_US    # Hello\nTom (Enhanced)       en_US    # Hello\nSamantha             en_US    # Hello\nBad News             en_US    # Hello\nDaniel (English (UK)) en_GB    # Hello')
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
 
   const answer = await run($, 'voice Ava')
@@ -357,6 +439,12 @@ test('/sidekick voice gives a persona a voice, and it sticks across loads', asyn
   expect((await run($, 'voice Rudy HAL')).text).toContain('No voice called "HAL"')
   // Karen is a known name but not installed in this stub, so the best natural voice stands in, and the reply says so
   expect((await run($, 'voice Ada Karen')).text).toBe("🧭 Ada now speaks as Ava (Premium). (Karen isn't installed here, so this stands in.)")
+  // a voice name with a space is a voice, not a sidekick plus a voice
+  expect((await run($, 'voice Bad News')).text).toBe('🦊 Rudy now speaks as Bad News.')
+  // Daniel was the old compact default, but chosen on purpose it stays
+  expect((await run($, 'voice Rudy Daniel')).text).toBe('🦊 Rudy now speaks as Daniel.')
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  expect((saved.get('personas') as Persona[]).find(p => p.id === 'rudy')?.voice).toBe('Daniel')
   await settle(() => false)
 })
 
@@ -376,9 +464,12 @@ test('persona helpers: parse, spoken, echo, options', () => {
   expect(parseGenerated('nonsense')).toBeUndefined()
   expect(parseGenerated(JSON.stringify({ ...NOVA, color: 'plaid', voice: 'HAL' }))).toMatchObject({ id: 'nova', color: 'cyan', voice: 'Ava' })
 
-  expect(spoken('# Title\n\n- one `two` [three](http://x)\n\nmore', false)).toBe('Title')
+  expect(spoken('# Title\n\n- one `two` [three](http://x)\n\nmore', false)).toBe('one two three')
   expect(spoken('First thing. Second thing. Third thing.', false)).toBe('First thing.')
-  expect(spoken('Hi there. All good. And more.\n\n---\n\nnot spoken', true)).toBe('Hi there. All good.')
+  expect(spoken('Hi there. All good. Want me to commit?\n\n---\n\nnot spoken', true)).toBe('Hi there. All good. Want me to commit?')
+  expect(spoken('Use a shorter name, e.g. Ada. Then retry.', false)).toBe('Use a shorter name, for example Ada.')
+  expect(speakable('Claude Code 2.1.289 is required; the plugin is at 0.2.2 and the deploy cost $0.03.')).toBe('Claude Code 2.1.289 is required. the plugin is at 0.2.2 and the deploy cost $0.03.')
+  expect(speakable('See https://sidekick.meertarbani.in/docs/talk-mode and hooks/register.tsx:617, then tests/sidekick.test.ts.')).toBe('See a link and the file, then the file.')
   expect(speakable('Fixed hooks/register.tsx: the $.state.set call in setTalk() now runs before stopListening(). Run /sidekick talk again.')).toBe(
     'Fixed the file. the state set call in set talk now runs before stop listening. Run slash sidekick talk again.',
   )
@@ -394,8 +485,9 @@ test('persona helpers: parse, spoken, echo, options', () => {
   expect(foreignWords('done the', 'Done, the tests pass.')).toBe(0)
   expect(foreignWords('done the hey rudy', 'Done, the tests pass.')).toBe(2)
 
-  const installed = parseSayVoices('Ava (Premium)        en_US    # Hello\nSamantha             en_US    # Hello\nKaren                en_AU    # Hi')
-  expect(installed).toEqual(['Ava (Premium)', 'Samantha', 'Karen'])
+  const installed = parseSayVoices('Ava (Premium)        en_US    # Hello\nSamantha             en_US    # Hello\nKaren                en_AU    # Hi\nMoira (English (Ireland)) en_IE    # Hello')
+  expect(installed).toEqual(['Ava (Premium)', 'Samantha', 'Karen', 'Moira (English (Ireland))'])
+  expect(pickVoice('moira', installed)).toBe('Moira (English (Ireland))')
   expect(bestVoice('Ava', installed)).toBe('Ava (Premium)')
   expect(bestVoice('Tom', installed)).toBe('Ava (Premium)')
   expect(bestVoice('Karen', installed)).toBe('Karen')
@@ -408,5 +500,10 @@ test('persona helpers: parse, spoken, echo, options', () => {
   expect(pickOption('later please', labels, false)).toBe('Ask me later')
   expect(pickOption('one and three', labels, true)).toBe('Run it, Ask me later')
   expect(pickOption('hmm', labels, false)).toBeUndefined()
+  expect(pickOption('the second one', labels, true)).toBe('Refuse')
   expect(pickOption('call it release candidate two', [], false)).toBe('call it release candidate two')
+  const builds = ['Run the tests', 'Run the build', 'Commit', 'Skip for now']
+  expect(pickOption('yes run the build', builds, false)).toBe('Run the build')
+  expect(pickOption('run it please', builds, false)).toBeUndefined()
+  expect(pickOption('the tests and the build', builds, true)).toBe('Run the tests, Run the build')
 })

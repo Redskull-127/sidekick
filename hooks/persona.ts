@@ -17,7 +17,8 @@ const COMPACT: Record<string, string> = {
 export function parseSayVoices(stdout: string): string[] {
   return stdout
     .split('\n')
-    .map(line => line.match(/^(.+?)\s{2,}[a-z]{2}[_-][A-Za-z]{2,}/)?.[1]?.trim())
+    // "Samantha (English (US)) en_US    # Hello" has one space before the locale; the "#" is what every line has
+    .map(line => line.match(/^(.+?)\s+[a-z]{2,3}[_-][A-Za-z]{2,}\s+#/)?.[1]?.trim())
     .filter((v): v is string => Boolean(v))
 }
 
@@ -26,8 +27,10 @@ export function bestVoice(base: string, installed: string[]): string {
   const have = new Set(installed)
   for (const variant of [`${base} (Premium)`, `${base} (Enhanced)`]) if (have.has(variant)) return variant
   const anyNatural = installed.find(v => /\((Premium|Enhanced)\)$/.test(v) && /^[A-Z]/.test(v))
-  if (anyNatural && !have.has(base)) return anyNatural
-  if (have.has(base)) return base
+  // the compact voice is listed bare or as "Daniel (English (UK))"; `say -v Daniel` takes either
+  const compact = installed.some(v => v === base || (v.startsWith(`${base} (`) && !/\((Premium|Enhanced)\)$/.test(v)))
+  if (anyNatural && !compact) return anyNatural
+  if (compact) return base
   return anyNatural ?? COMPACT[base] ?? 'Samantha'
 }
 
@@ -42,7 +45,8 @@ export function pickVoice(name: string, installed: string[]): string | undefined
   if (!want) return undefined
   const base = VOICES.find(v => v.toLowerCase() === want)
   if (base) return base
-  return installed.find(v => v.toLowerCase() === want || v.toLowerCase().replace(/ \((premium|enhanced)\)$/, '') === want)
+  // "Moira" finds "Moira (English (Ireland))" the way `say -v Moira` does
+  return installed.find(v => v.toLowerCase() === want || v.toLowerCase().replace(/ \(.*\)$/, '') === want)
 }
 export const COLORS = ['cyan', 'magenta', 'green', 'yellow', 'blue', 'red'] as const
 
@@ -96,14 +100,18 @@ export function parseGenerated(text: string): Persona | undefined {
 
 const SENTENCES = /(?<=[.!?])\s+/
 
-/** What gets read aloud: short. Talk mode: up to two sentences of the head (before a `---` line); otherwise the opening sentence. */
+/** What gets read aloud: short. Talk mode: up to three sentences of the head (before a `---` line); otherwise the opening sentence. */
 export function spoken(markdown: string, isTalk: boolean): string {
-  let text = markdown.replace(/```[\s\S]*?```/g, ' ')
+  let text = markdown
+    .replace(/```[\s\S]*?```/g, ' ')
+    // a heading is a label, not the outcome; "e.g." would end the sentence
+    .replace(/^#{1,6}\s.*$/gm, '')
+    .replace(/\be\.g\./gi, 'for example')
+    .replace(/\bi\.e\./gi, 'that is')
   text = isTalk ? (text.split(/\n-{3,}\s*\n/)[0] ?? '') : (text.trim().split(/\n\s*\n/)[0] ?? '')
   const plain = text
     .replace(/`([^`]*)`/g, '$1')
     .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
-    .replace(/^#{1,6}\s+/gm, '')
     .replace(/^\s*[-*+]\s+/gm, '')
     .replace(/^\s*\d+\.\s+/gm, '')
     .replace(/[*_~>|]/g, '')
@@ -111,20 +119,27 @@ export function spoken(markdown: string, isTalk: boolean): string {
     .trim()
   const sentences = plain.split(SENTENCES).filter(Boolean)
   // ponytail: people hate being read an essay; the screen has the rest
-  return speakable(sentences.slice(0, isTalk ? 2 : 1).join(' ')).slice(0, isTalk ? 280 : 200)
+  return speakable(sentences.slice(0, isTalk ? 3 : 1).join(' ')).slice(0, isTalk ? 280 : 200)
 }
 
 /** Code read aloud is noise: paths, identifiers, symbols and slash commands are dropped or said plainly. */
 export function speakable(text: string): string {
   const EXT = /\.(tsx?|jsx?|json|md|swift|py|css|html|ya?ml|toml|sh|wav|png)$/i
   return text
-    .replace(/\/sidekick\b/g, 'slash sidekick')
-    .replace(/\b[\w.-]*\/[\w./-]+/g, (m) => (EXT.test(m) ? 'the file' : 'the path'))
+    .replace(/\bhttps?:\/\/\S+/g, (m) => `a link${/[.,!?]$/.test(m) ? m.slice(-1) : ''}`)
+    .replace(/(^|\s)\/sidekick\b/g, '$1slash sidekick')
+    .replace(/\b[\w.-]*\/[\w./-]+(:\d+)?/g, (m) => {
+      const end = m.endsWith('.') ? '.' : ''
+      return (EXT.test(m.replace(/(:\d+)?\.?$/, '')) ? 'the file' : 'the path') + end
+    })
     .replace(/\b[\w-]+\.(tsx?|jsx?|json|md|swift|py|css|html|ya?ml|toml|sh|wav|png)\b/gi, 'the file')
-    .replace(/[`$<>{}[\]|\\^~]/g, ' ')
+    .replace(/[`<>{}[\]|\\^~]/g, ' ')
+    // "$.state" is noise, "$0.03" is money
+    .replace(/\$(?!\d)/g, ' ')
     .replace(/\b\w+\(\)/g, (m) => m.slice(0, -2))
     .replace(/\b\w+_\w+\b/g, (m) => m.replace(/_/g, ' '))
-    .replace(/\b(\w+)\.(?=\w)/g, '$1 ')
+    // "state.set" is two words, "2.1.289" stays a number
+    .replace(/\b([A-Za-z]\w*)\.(?=[A-Za-z])/g, '$1 ')
     .replace(/\b([a-z]+)([A-Z][a-z]+)+\b/g, (m) => m.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase())
     .replace(/\s*[:;]\s+/g, '. ')
     .replace(/(^|\s)\.(?=\w)/g, '$1')
@@ -206,14 +221,16 @@ export function pickOption(said: string, labels: string[], multiSelect: boolean)
   if (!s) return undefined
   const hits = new Set<number>()
   const ordinals = s.split(' ').filter(w => ORDINALS[w] !== undefined)
-  // "the second one": "one" is a pronoun here, not a number
-  const counted = !multiSelect && ordinals.length > 1 ? ordinals.filter(w => w !== 'one') : ordinals
+  // "the second one": "one" after another ordinal is a pronoun, not a number; "one and three" keeps it
+  const counted = ordinals.filter((w, i) => w !== 'one' || i === 0)
   for (const w of counted) {
     const n = ORDINALS[w]!
     if (labels.length > 0) hits.add(n === -1 ? labels.length - 1 : n)
   }
   let best = -1
   let bestScore = 0
+  let tied = false
+  const scored = new Set<number>()
   labels.forEach((label, i) => {
     const l = norm(label)
     if (!l) return
@@ -222,20 +239,28 @@ export function pickOption(said: string, labels: string[], multiSelect: boolean)
       return
     }
     const score = words(label).filter(w => s.includes(w)).length
+    if (score > 0) scored.add(i)
     if (score > bestScore) {
       bestScore = score
       best = i
-    }
+      tied = false
+    } else if (score > 0 && score === bestScore) tied = true
   })
-  if (/^(yes|yeah|yep|sure|okay|ok|go ahead|do it)\b/.test(s)) {
+  // "yes" and "no" stand for an option only when none was named ("yes, the build" is the build)
+  if (hits.size === 0 && /^(yes|yeah|yep|sure|okay|ok|go ahead|do it)\b/.test(s)) {
     const i = labels.findIndex(l => /^(yes|run|proceed|ok|go|do it|recommended)/i.test(l) || /recommended/i.test(l))
     if (i >= 0) hits.add(i)
   }
-  if (/^(no|nope|nah|cancel|skip)\b/.test(s)) {
+  if (hits.size === 0 && /^(no|nope|nah|cancel|skip)\b/.test(s)) {
     const i = labels.findIndex(l => /^(no|cancel|skip|refuse|stop)/i.test(l))
     if (i >= 0) hits.add(i)
   }
-  if (hits.size === 0 && best >= 0) hits.add(best)
+  if (hits.size === 0) {
+    if (multiSelect) for (const i of scored) hits.add(i)
+    // "run it" between "Run the tests" and "Run the build" is a coin flip: ask again instead
+    else if (tied) return undefined
+    else if (best >= 0) hits.add(best)
+  }
   const picked = [...hits].filter(i => i >= 0 && i < labels.length).sort((a, b) => a - b).map(i => labels[i]!)
   if (picked.length > 0) return multiSelect ? picked.join(', ') : picked[0]
   return s.split(' ').length >= 3 ? said.trim() : undefined
@@ -243,6 +268,6 @@ export function pickOption(said: string, labels: string[], multiSelect: boolean)
 
 /** How a question is read aloud: the question, then its numbered options. */
 export function askAloud(question: string, labels: string[], again = false): string {
-  const opts = labels.map((l, i) => `${i + 1}: ${l}.`).join(' ')
+  const opts = labels.map((l, i) => `${i + 1}: ${speakable(l)}.`).join(' ')
   return again ? `Sorry, which one? ${opts}` : `${question} ${opts}`.trim()
 }

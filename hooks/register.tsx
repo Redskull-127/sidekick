@@ -37,7 +37,7 @@ const STOP = /^(stop|wait|hold on|hang on|never ?mind|shut up|quiet)\b/i
 
 let installedVoices: string[] = []
 
-/** Which voices `say` has right now; a natural one that was downloaded since is found on the next session. */
+/** Which voices `say` has right now. */
 async function loadVoices($: EngineInterface) {
   try {
     const r = await $.process.run(['say', '-v', '?'])
@@ -50,22 +50,28 @@ async function loadVoices($: EngineInterface) {
 /** Store → state, at session start and after /clear, /resume, /branch. */
 async function load($: EngineInterface, speakByDefault: boolean) {
   const saved = (await $.store.get('personas')) as Persona[] | undefined
-  // presets saved by an earlier version with the compact voices move to the natural ones once; a voice the person chose stays
-  const list = (saved && saved.length > 0 ? saved : PRESETS).map(p => {
+  const migrated = (await $.store.get('voicesMigrated')) as boolean | undefined
+  // no list yet seeds the presets; an empty list means everyone was removed and stays empty.
+  // presets saved by 0.1 with the compact voices move to the natural ones, once; after that a chosen voice stays
+  const list = (saved ?? PRESETS).map(p => {
     const preset = PRESETS.find(x => x.id === p.id)
-    return preset && (p.voice === 'Samantha' || p.voice === 'Daniel') ? { ...p, voice: preset.voice } : p
+    return !migrated && preset && (p.voice === 'Samantha' || p.voice === 'Daniel') ? { ...p, voice: preset.voice } : p
   })
-  if (!saved) await $.store.set('personas', list)
+  if (!saved || !migrated) {
+    await $.store.set('personas', list)
+    await $.store.set('voicesMigrated', true)
+  }
   const activeId = (await $.store.get('active')) as string | null | undefined
-  const muted = (await $.store.get('isMuted')) as boolean | undefined
   await $.state.set(roster, list)
   await $.state.set(active, list.find(p => p.id === activeId) ?? null)
-  await $.state.set(isMuted, muted ?? !speakByDefault)
-  // talk mode is per session: a new session starts quiet
+  // mute and talk mode are per session; the `speak` option in /config is the default
+  await $.state.set(isMuted, !speakByDefault)
   await $.state.set(isTalk, false)
 }
 
 async function setActive($: EngineInterface, p: Persona | null) {
+  // no sidekick, no ear: the pane's off key and rm must not leave the microphone open
+  if (!p) await setTalk($, false)
   await $.state.set(active, p)
   await $.store.set('active', p?.id ?? null)
 }
@@ -73,7 +79,6 @@ async function setActive($: EngineInterface, p: Persona | null) {
 async function toggleMute($: EngineInterface) {
   const muted = !(((await $.state.get(isMuted)).value ?? false))
   await $.state.set(isMuted, muted)
-  await $.store.set('isMuted', muted)
   return muted
 }
 
@@ -95,6 +100,8 @@ async function say($: EngineInterface, text: string, voice: string) {
   speechNow = text
   recentSpeech = [...recentSpeech.slice(-2), text]
   await $.state.set(isSpeaking, true)
+  // until a natural voice is there, look again before each reply: one downloaded mid-session is used at once
+  if (!hasNaturalVoice(installedVoices)) await loadVoices($)
   try {
     await $.audio.speak(text, { voice: bestVoice(voice, installedVoices) })
   } catch {
@@ -144,6 +151,9 @@ function sourceVersion(source: string): string {
 // the listener is built and run at fixed paths under /var/tmp/sidekick, outside any project;
 // every path below is written out in full at the call, so a reader can see each one
 
+// why the listener could not be built, for the reply to /sidekick talk
+let listenerProblem = ''
+
 /** Where the compiled listener lives, building it on first use from the source in listener-source.ts; null when it cannot be built here. */
 async function listenerPath($: EngineInterface): Promise<string | null> {
   const version = sourceVersion(LISTENER_SWIFT)
@@ -164,21 +174,26 @@ async function listenerPath($: EngineInterface): Promise<string | null> {
       { timeoutMs: 240_000 },
     )
     if (compiled.exitCode !== 0) {
+      // /usr/bin/swiftc exists on every Mac; without the Command Line Tools it exits non-zero and says so
       const why = compiled.stderr.split('\n').find(l => l.includes('error:')) ?? compiled.stderr.slice(0, 200)
-      $.ui.toast(`Listener build failed: ${why}`)
+      listenerProblem = /xcode-select|developer tools|command line tools/i.test(compiled.stderr)
+        ? 'Hands-free needs the Xcode Command Line Tools. Run xcode-select --install, then /sidekick talk again.'
+        : `The listener did not build: ${why}`
       return null
     }
     await $.fs.write('/var/tmp/sidekick/listen.version', version)
     return '/var/tmp/sidekick/listen'
   } catch {
-    $.ui.toast('Hands-free needs macOS with the Xcode Command Line Tools (xcode-select --install).')
+    listenerProblem = 'Hands-free needs macOS: the listener uses Apple speech recognition. Replies stay text here.'
     return null
   }
 }
 
-type Heard = { text: string | null; isCancelled: boolean; isFatal: boolean; isEcho: boolean }
+type Heard = { text: string | null; raw: string; error: string; isCancelled: boolean; isFatal: boolean; isBroken: boolean; isEcho: boolean }
 
 let listening: { bin: string; isCancelled: boolean } | null = null
+// this session's id tags its listener, so stopping here never stops another session's
+let sessionTag = ''
 let earLoop: Promise<void> | null = null
 let earPaused = false
 let runningTurn: string | null = null
@@ -189,7 +204,7 @@ async function stopListening($: EngineInterface) {
   if (!current) return
   current.isCancelled = true
   // ponytail: a pending stream read cannot be interrupted from here, so the child is ended by name
-  await quietly($.process.run(['pkill', '-f', '/var/tmp/sidekick/listen']))
+  await quietly($.process.run(['pkill', '-f', `/var/tmp/sidekick/listen .*--session ${sessionTag}`]))
 }
 
 /**
@@ -203,10 +218,11 @@ async function listen($: EngineInterface, bin: string): Promise<Heard> {
   await $.state.set(heard, '')
   await $.state.set(isListening, true)
   let out = ''
+  let error = ''
   let code: number | null = null
   let bargedIn = false
   try {
-    const child = $.process.spawn({ argv: ['/var/tmp/sidekick/listen', '--silence', '1.4', '--max', '60'] })
+    const child = $.process.spawn({ argv: ['/var/tmp/sidekick/listen', '--silence', '1.4', '--max', '60', '--session', sessionTag] })
     for await (const { stream, text } of child) {
       if (stream === 'stdout') {
         out += text
@@ -221,7 +237,7 @@ async function listen($: EngineInterface, bin: string): Promise<Heard> {
             bargedIn = true
             void hush($)
           }
-        } else if (line.startsWith('error:')) $.ui.toast(`Listener: ${line.slice(6)}`)
+        } else if (line.startsWith('error:')) error = line.slice(6).trim()
       }
     }
     code = (await child.result).code
@@ -234,8 +250,12 @@ async function listen($: EngineInterface, bin: string): Promise<Heard> {
   const said = stripEcho(raw, echoText())
   return {
     text: run.isCancelled || !said ? null : said,
+    raw,
+    error,
     isCancelled: run.isCancelled,
     isFatal: code !== null && code >= 3,
+    // quit without hearing anything and without being asked to: an error, or killed from outside
+    isBroken: !run.isCancelled && !raw && (code === 2 || code === null),
     isEcho: raw.length > 0 && !said,
   }
 }
@@ -257,6 +277,7 @@ async function runEar($: EngineInterface) {
   const bin = await listenerPath($)
   if (!bin) return setTalk($, false)
   let quiet = 0
+  let failed = 0
   while (((await $.state.get(isTalk)).value ?? false)) {
     if (earPaused) {
       await $.clock.sleep(200)
@@ -267,7 +288,21 @@ async function runEar($: EngineInterface) {
       if (!(((await $.state.get(isTalk)).value ?? false))) return
       continue
     }
-    if (r.isFatal) return setTalk($, false)
+    if (r.isFatal) {
+      await setTalk($, false)
+      $.ui.toast(`${p.name} can't listen: ${r.error || 'the listener quit'}`)
+      return
+    }
+    if (r.isBroken) {
+      // a listener that quits at once is broken, not quiet: three in a row end talk mode, with the reason
+      if (++failed >= 3) {
+        await setTalk($, false)
+        $.ui.toast(`${p.name} can't hear: ${r.error || 'the listener keeps quitting'}. /sidekick talk to retry.`)
+        return
+      }
+      await $.clock.sleep(1000)
+      continue
+    }
     if (r.text === null) {
       const busy = r.isEcho || runningTurn !== null || (((await $.state.get(isSpeaking)).value ?? false))
       if (!busy && ++quiet >= 3) {
@@ -279,13 +314,17 @@ async function runEar($: EngineInterface) {
       continue
     }
     quiet = 0
+    failed = 0
     const said = r.text
-    if (((await $.state.get(isSpeaking)).value ?? false)) await hush($)
-    if (END_TALK.test(said)) {
+    const wasSpeaking = ((await $.state.get(isSpeaking)).value ?? false)
+    if (wasSpeaking) await hush($)
+    // "stop" is a command when something is running or when it is all that was said; "stop the dev server" is a prompt
+    const wordCount = said.split(/\s+/).length
+    if (wordCount <= 5 && END_TALK.test(said)) {
       await setTalk($, false)
       return
     }
-    if (STOP.test(said)) {
+    if (STOP.test(said) && (wordCount <= 3 || runningTurn || wasSpeaking)) {
       if (runningTurn) await quietly($.turn.abort({ turnId: runningTurn }))
       continue
     }
@@ -318,16 +357,21 @@ const findPersona = (list: Persona[], q: string) =>
 
 export const register: Register = (on, options) => {
   const speakByDefault = options.speak !== false
+  let isHeadless = false
 
   on('session.start', async ($, e, next) => {
+    // a `claude -p` run has no one to talk to: nothing loads, so every other hook stays out of the way
+    isHeadless = !e.isInteractive
+    if (isHeadless) return next(e)
+    sessionTag = await $.session.id()
     await loadVoices($)
     await load($, speakByDefault)
-    if (((await $.state.get(active)).value ?? null)) void $.ui.open({ id: PANE, title: 'Sidekick' })
+    if (((await $.state.get(active)).value ?? null)) void $.ui.open({ id: PANE, title: 'Sidekick', closeOnEscape: true })
     try {
       await $.command.register({
         name: 'sidekick',
         description: 'Persona agents you can talk to: create, switch, talk hands-free, mute',
-        argumentHint: '[new <description> | use <name> | off | talk | mute | speak | list | rm <name>]',
+        argumentHint: '[new <description> | use <name> | off | talk | mute | speak | voices [install] | voice [<name>] <voice> | list | rm <name>]',
         immediate: true,
       })
     } catch {
@@ -337,6 +381,7 @@ export const register: Register = (on, options) => {
   })
 
   on('classic.SessionStart', { source: ['clear', 'resume', 'fork'] }, async ($, e, next) => {
+    if (isHeadless) return next(e)
     await load($, speakByDefault)
     return next(e)
   })
@@ -357,12 +402,17 @@ export const register: Register = (on, options) => {
         if (!r.isAnswered) return { text: `Couldn't reach the model (${r.reason}). Try again.` }
         const p = parseGenerated(r.text)
         if (!p) return { text: 'The model did not return a persona I could read. Try a clearer description.' }
-        if (list.some(x => x.id === p.id)) p.id = `${p.id}-${list.length + 1}`
+        if (list.some(x => x.id === p.id) || findPersona(list, p.name)) {
+          // the name is how use, rm and voice find it, so a second Rudy is "Rudy 3", not a hidden rudy-3
+          const n = list.length + 1
+          p.id = `${p.id}-${n}`
+          p.name = `${p.name} ${n}`
+        }
         const grown = [...list, p]
         await $.state.set(roster, grown)
         await $.store.set('personas', grown)
         await setActive($, p)
-        void $.ui.open({ id: PANE, title: 'Sidekick' })
+        void $.ui.open({ id: PANE, title: 'Sidekick', closeOnEscape: true })
         void chime($)
         return { text: `${p.glyph} ${p.name} is ready. "${p.tagline}"\n${p.name} is driving now. /sidekick talk to speak with ${p.name}.` }
       }
@@ -370,12 +420,11 @@ export const register: Register = (on, options) => {
         const p = findPersona(list, arg)
         if (!p) return { text: `No sidekick named "${arg}". /sidekick list` }
         await setActive($, p)
-        void $.ui.open({ id: PANE, title: 'Sidekick' })
+        void $.ui.open({ id: PANE, title: 'Sidekick', closeOnEscape: true })
         void chime($)
         return { text: `${p.glyph} ${p.name} is driving now.` }
       }
       case 'off': {
-        await setTalk($, false)
         await setActive($, null)
         return { text: 'Sidekick off. Plain Claude is back.' }
       }
@@ -383,6 +432,11 @@ export const register: Register = (on, options) => {
         const p = ((await $.state.get(active)).value ?? null)
         if (!p) return { text: 'Pick a sidekick first: /sidekick use Rudy' }
         const wasOn = ((await $.state.get(isTalk)).value ?? false)
+        if (!wasOn) {
+          // built (once) before anything is announced, so a Mac that cannot listen gets the reason as the reply
+          const bin = await listenerPath($)
+          if (!bin) return { text: `🎙 ${listenerProblem}` }
+        }
         await toggleTalk($)
         if (wasOn) return { text: '🎙 Talk mode off.' }
         if (!hasNaturalVoice(installedVoices)) $.ui.toast('Voice sounds robotic? /sidekick voices install gets Apple\'s natural ones.')
@@ -406,10 +460,11 @@ export const register: Register = (on, options) => {
       }
       case 'voice': {
         const cur = (await $.state.get(active)).value ?? null
-        // "voice Ava" is the active sidekick; "voice Rudy Ava" names one
-        const target = rest.length > 1 ? findPersona(list, rest[0]!) : cur
-        const wanted = rest.length > 1 ? rest.slice(1).join(' ') : arg
-        if (!target) return { text: rest.length > 1 ? `No sidekick named "${rest[0]}".` : 'Pick a sidekick first: /sidekick use Rudy' }
+        // "voice Rudy Ava" names a sidekick; otherwise every word is the voice ("voice Bad News")
+        const named = rest.length > 1 ? findPersona(list, rest[0]!) : undefined
+        const target = named ?? cur
+        const wanted = named ? rest.slice(1).join(' ') : arg
+        if (!target) return { text: 'Pick a sidekick first: /sidekick use Rudy' }
         if (!wanted) return { text: `${target.glyph} ${target.name} speaks as ${bestVoice(target.voice, installedVoices)}. Choose from: ${VOICES.join(', ')}, or any installed voice (/sidekick voices).` }
         await loadVoices($)
         const voice = pickVoice(wanted, installedVoices)
@@ -426,8 +481,9 @@ export const register: Register = (on, options) => {
       }
       case 'mute':
       case 'speak': {
-        const muted = await toggleMute($)
-        return { text: muted ? '🔇 Replies are no longer spoken.' : '🔊 Replies are spoken again.' }
+        const muted = sub === 'mute'
+        await $.state.set(isMuted, muted)
+        return { text: muted ? '🔇 Replies are no longer spoken this session.' : '🔊 Replies are spoken again.' }
       }
       case 'list': {
         const cur = ((await $.state.get(active)).value ?? null)
@@ -518,7 +574,10 @@ export const register: Register = (on, options) => {
           const r = await hearing
           await hush($)
           if (r.isCancelled || r.isFatal) break
-          if (r.text) picked = labels.length > 0 ? pickOption(r.text, labels, q.multiSelect) : r.text
+          // the question named every option, so "production" alone looks like its echo: a few words naming exactly one option are the answer
+          const named = labels.filter(l => pickOption(r.raw, [l], false) === l)
+          const answer = r.text ?? (named.length === 1 && r.raw.split(/\s+/).length <= 4 ? r.raw : null)
+          if (answer) picked = labels.length > 0 ? pickOption(answer, labels, q.multiSelect) : answer
         }
         await $.state.set(question, null)
         if (!picked) {

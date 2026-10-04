@@ -4,7 +4,7 @@ Persona agents you can talk to inside Claude Code. A sidekick is the one driving
 
 ```
 /sidekick new Rudy, a blunt senior Rust dev who hates abstractions
-  🦊 Rudy is ready. "Ship it or delete it."        ← spoken aloud in Rudy's voice
+  🦊 Rudy is ready. "Ship it or delete it."
 
 /sidekick talk
   🎙 Talk mode on. Just speak; Rudy answers out loud and listens again.
@@ -18,7 +18,7 @@ Two sidekicks ship so it works before you create anyone: **Ada** (calm staff eng
 - The sidekick is told to ask you with a short, concrete question whenever it needs input instead of guessing, to answer "brief?" in a few lines, and to say what broke and what it changed when it fixes something.
 - The opening sentence of each reply is read aloud in the sidekick's macOS voice. `/sidekick mute` turns that off.
 - **Talk mode** (`/sidekick talk`) is hands-free and continuous. The sidekick greets you and listens; when you pause it sends what you said as your prompt, works, speaks the answer, and keeps listening. No key to hold. **Talk over it to interrupt**: the moment it hears words that aren't its own, it stops speaking and takes yours as the next prompt. Say **"stop"** or "wait" while it works to cancel the turn. Say **"end talk"** to stop. A band above the prompt shows what is happening (`listening…` with the words as they are recognized, `speaking…`, `working…`) with `s` to skip the speech, `m` to mute and `x` to end. Three long silences in a row end talk mode on their own.
-- **Short answers.** Spoken replies are one sentence (two in talk mode); the persona is told to keep the whole reply to a few lines and to expand only when asked.
+- **Short answers.** Spoken replies are one sentence (up to three in talk mode); the persona is told to keep the whole reply to a few lines and to expand only when asked.
 - **Questions by voice.** When the sidekick needs a decision in talk mode it reads the question and the numbered options aloud, listens, and takes your answer: "the second one", "production", "yes", or a free-text answer of a few words. If it can't match what you said after two tries, the normal dialog opens and you pick with a key.
 - In talk mode the sidekick keeps the spoken part short and puts code after a `---` line that is shown but not read.
 
@@ -30,12 +30,12 @@ Two sidekicks ship so it works before you create anyone: **Ada** (calm staff eng
 | `/sidekick new <description>` | Generates a persona (name, glyph, voice, catchphrase, character) with Haiku and makes it active |
 | `/sidekick use <name>` / `/sidekick off` | Switch sidekick / plain Claude |
 | `/sidekick talk` | Toggle hands-free talk mode (voice in, voice out) |
-| `/sidekick mute` / `/sidekick speak` | Toggle spoken replies |
+| `/sidekick mute` / `/sidekick speak` | Stop / resume spoken replies for this session |
 | `/sidekick voices` / `/sidekick voices install` | Show which Apple voices are installed; open the pane to download natural ones |
 | `/sidekick voice <voice>` / `/sidekick voice <name> <voice>` | Give the active sidekick, or a named one, a voice (`/sidekick voice Ava`) |
 | `/sidekick list` / `/sidekick rm <name>` | Housekeeping |
 
-Sidekicks, the active one, and mute/talk state persist across sessions in the plugin's store. The `Speak replies` option in `/config` sets the default.
+Sidekicks and the active one persist across sessions in the plugin's store; mute and talk mode are per session, and the `Speak replies` option in `/config` sets the default.
 
 ## Voices
 
@@ -68,8 +68,9 @@ Everything the plugin does is in its readable source. Spelled out, because a plu
 **Programs it starts, and why**
 - `say` speaks replies in the sidekick's voice; `killall say` cuts a reply short when you interrupt or press `s`.
 - `say -v ?` lists the voices you have, so a Premium or Enhanced one is used when installed.
+- `afplay`, through Claude Code's audio API, plays the two chimes synthesized in `hooks/chime.ts`.
 - `mkdir -p /var/tmp/sidekick` and `swiftc` once, to compile the listener source (`hooks/listener-source.ts` in this repo, written to `/var/tmp/sidekick/listen.swift`) into `/var/tmp/sidekick/listen`.
-- `/var/tmp/sidekick/listen`, while talk mode is on, to hear you through the microphone; `pkill -f /var/tmp/sidekick/listen` to stop listening.
+- `/var/tmp/sidekick/listen --session <this session's id>`, while talk mode is on, to hear you through the microphone; `pkill -f` on that exact command line to stop listening, so another session's listener is never touched.
 - `open x-apple.systempreferences:…SpokenContent` when you run `/sidekick voices install`, to show the voice download pane.
 
 **Files it writes**
@@ -101,6 +102,8 @@ claude plugin validate .   # what the engine reads from the module
 claude plugin test .       # tests/sidekick.test.ts, no session or network
 claude --plugin-dir .      # hot-reloads on save
 ```
+
+The first load writes `.claude-plugin/types/` and a one-line `tsconfig.json` (both gitignored); from then on the editor and `npx tsc -p .` type-check against the real mods API.
 
 ## How hands-free works
 
