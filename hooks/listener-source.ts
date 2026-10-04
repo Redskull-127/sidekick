@@ -139,7 +139,6 @@ exit(0)
 /** Usage descriptions linked into the binary, so macOS can ask for the microphone and speech recognition. */
 export const LISTENER_PLIST = String.raw`
 <?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>CFBundleIdentifier</key><string>dev.meertarbani.sidekick.listen</string>
   <key>CFBundleName</key><string>sidekick-listen</string>

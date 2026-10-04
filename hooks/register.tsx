@@ -26,7 +26,6 @@ const USAGE = [
   '/sidekick list | rm <name>',
 ].join('\n')
 
-const VOICE_SETTINGS = 'x-apple.systempreferences:com.apple.preference.universalaccess?SpokenContent'
 const VOICE_STEPS = [
   'System Settings → Accessibility → Spoken Content → System Voice → ⓘ Manage Voices → English.',
   'Download Ava (Premium) and Tom (Enhanced), or any voice marked Premium or Enhanced. Sidekicks pick them up at once.',
@@ -133,33 +132,29 @@ async function hush($: EngineInterface) {
 
 /** A short stable hash of the listener's source, so a changed source gets a fresh build. */
 function sourceVersion(source: string): string {
-  let h = 5381
-  for (let i = 0; i < source.length; i++) h = ((h * 33) ^ source.charCodeAt(i)) >>> 0
-  return h.toString(16)
+  let hash = 5381
+  for (let i = 0; i < source.length; i++) hash = ((hash * 33) ^ source.charCodeAt(i)) >>> 0
+  return hash.toString(16)
 }
 
-// where the listener is built and run: fixed paths, outside any project
-const LISTENER_DIR = '/var/tmp/sidekick'
-const LISTENER_SOURCE = '/var/tmp/sidekick/listen.swift'
-const LISTENER_PLIST_PATH = '/var/tmp/sidekick/Info.plist'
-const LISTENER_BIN = '/var/tmp/sidekick/listen'
-const LISTENER_VERSION_FILE = '/var/tmp/sidekick/listen.version'
+// the listener is built and run at fixed paths under /var/tmp/sidekick, outside any project;
+// every path below is written out in full at the call, so a reader can see each one
 
 /** Where the compiled listener lives, building it on first use from the source in listener-source.ts; null when it cannot be built here. */
 async function listenerPath($: EngineInterface): Promise<string | null> {
   const version = sourceVersion(LISTENER_SWIFT)
   let built = ''
   try {
-    built = await $.fs.read(LISTENER_VERSION_FILE)
+    built = await $.fs.read('/var/tmp/sidekick/listen.version')
   } catch {
     built = ''
   }
-  if (built.trim() === version && (await $.fs.exists(LISTENER_BIN))) return LISTENER_BIN
+  if (built.trim() === version && (await $.fs.exists('/var/tmp/sidekick/listen'))) return '/var/tmp/sidekick/listen'
   $.ui.toast('Building the sidekick listener, one time, about 20 seconds…')
   try {
-    await $.process.run(['mkdir', '-p', LISTENER_DIR])
-    await $.fs.write(LISTENER_SOURCE, LISTENER_SWIFT)
-    await $.fs.write(LISTENER_PLIST_PATH, LISTENER_PLIST)
+    await $.process.run(['mkdir', '-p', '/var/tmp/sidekick'])
+    await $.fs.write('/var/tmp/sidekick/listen.swift', LISTENER_SWIFT)
+    await $.fs.write('/var/tmp/sidekick/Info.plist', LISTENER_PLIST)
     const compiled = await $.process.run(
       ['swiftc', '-O', '/var/tmp/sidekick/listen.swift', '-o', '/var/tmp/sidekick/listen', '-Xlinker', '-sectcreate', '-Xlinker', '__TEXT', '-Xlinker', '__info_plist', '-Xlinker', '/var/tmp/sidekick/Info.plist'],
       { timeoutMs: 240_000 },
@@ -169,8 +164,8 @@ async function listenerPath($: EngineInterface): Promise<string | null> {
       $.ui.toast(`Listener build failed: ${why}`)
       return null
     }
-    await $.fs.write(LISTENER_VERSION_FILE, version)
-    return LISTENER_BIN
+    await $.fs.write('/var/tmp/sidekick/listen.version', version)
+    return '/var/tmp/sidekick/listen'
   } catch {
     $.ui.toast('Hands-free needs macOS with the Xcode Command Line Tools (xcode-select --install).')
     return null
@@ -391,7 +386,7 @@ export const register: Register = (on, options) => {
       }
       case 'voices': {
         if (arg === 'install') {
-          await quietly($.process.run(['open', VOICE_SETTINGS]))
+          await quietly($.process.run(['open', 'x-apple.systempreferences:com.apple.preference.universalaccess?SpokenContent']))
           return { text: `Opened System Settings.\n${VOICE_STEPS}` }
         }
         await loadVoices($)

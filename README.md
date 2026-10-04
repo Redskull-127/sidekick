@@ -103,10 +103,10 @@ claude --plugin-dir .      # hot-reloads on save
 
 A mod cannot open a microphone itself, so the sidekick spawns the listener binary, over and over, for as long as talk mode is on. Each run records until you pause for 1.4 seconds (or 60 seconds at most), streams the partial transcript to the band, prints the final text, and exits. The mod submits that text as your prompt.
 
-The listener runs while the sidekick speaks too, so you can interrupt. Its own voice comes back through the microphone, so the mod drops the leading words that match what it was saying; the first two words that aren't its own cut the speech short. The listener captures through AVFoundation and picks the system's default microphone (`/var/tmp/sidekick/listen --list-devices` shows them once built; pass `--device <name part>` in `hooks/register.tsx` to pin one).
+The listener runs while the sidekick speaks too, so you can interrupt. Its own voice comes back through the microphone, so the mod drops the leading words that match what it was saying; the first two words that aren't its own cut the speech short. The listener captures through AVFoundation and picks the system's default microphone (`/var/tmp/sidekick/listen --list-devices` shows them once built; add `--device <name part>` to the listener's arguments in `hooks/register.tsx` to pin one).
 
 ## Known limits
 
 - Echo is filtered by words, not by acoustics. Repeating the sidekick's own words back to it right after it says them won't register as a new prompt.
-- Languages: the listener uses your macOS locale. Pass `--lang` in `hooks/register.tsx` to pin one.
+- Languages: the listener uses your macOS locale. Add `--lang` to the listener's arguments in `hooks/register.tsx` to pin one.
 - After editing the Swift in `hooks/listener-source.ts`, the binary rebuilds on next use (the build is keyed to a hash of the source). The chimes are synthesized in `hooks/chime.ts`.
