@@ -74,8 +74,13 @@ async function toggleMute($: EngineInterface) {
 }
 
 let speechNow = ''
+let recentSpeech: string[] = []
 let sayId = 0
 let isHushed = false
+
+// ponytail: the last three utterances are the echo vocabulary; the recognizer delivers its transcript
+// well after the speaker goes quiet, so "what is playing right now" was never the right question
+const echoText = () => recentSpeech.join(' ')
 
 /** Speaks in the persona's voice, cutting any speech still going; falls back to the default voice, then to silence. */
 async function say($: EngineInterface, text: string, voice: string) {
@@ -84,6 +89,7 @@ async function say($: EngineInterface, text: string, voice: string) {
   const mine = ++sayId
   isHushed = false
   speechNow = text
+  recentSpeech = [...recentSpeech.slice(-2), text]
   await update($, isSpeaking, () => true)
   try {
     await $.audio.speak(text, { voice: bestVoice(voice, installedVoices) })
@@ -169,22 +175,20 @@ async function listen($: EngineInterface, bin: string): Promise<Heard> {
   await update($, isListening, () => true)
   let out = ''
   let code: number | null = null
-  let echo = speechNow
   let bargedIn = false
   try {
     const child = $.process.spawn({ argv: [bin, '--silence', '1.4', '--max', '60'] })
     for await (const { stream, text } of child) {
-      if (speechNow) echo = speechNow
       if (stream === 'stdout') {
         out += text
         continue
       }
       for (const line of text.split('\n')) {
         if (line.startsWith('partial:')) {
-          const own = stripEcho(line.slice(8), echo)
+          const own = stripEcho(line.slice(8), echoText())
           await update($, heard, () => own)
-          // ponytail: two words that are not in its own speech mean the human is talking over it
-          if (speechNow && !bargedIn && foreignWords(line.slice(8), echo) >= 2) {
+          // two words that are not in its own speech mean the human is talking over it
+          if (speechNow && !bargedIn && foreignWords(line.slice(8), echoText()) >= 2) {
             bargedIn = true
             void hush($)
           }
@@ -198,7 +202,7 @@ async function listen($: EngineInterface, bin: string): Promise<Heard> {
   if (listening === run) listening = null
   await update($, isListening, () => false)
   const raw = out.trim()
-  const said = stripEcho(raw, echo)
+  const said = stripEcho(raw, echoText())
   return {
     text: run.isCancelled || !said ? null : said,
     isCancelled: run.isCancelled,

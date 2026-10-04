@@ -208,16 +208,29 @@ test('talk mode: chime, you speak, it sends; its echo is ignored; you talk over 
   await band.unmount()
 })
 
-test('a reply that finishes unhurried is followed by the "your turn" chime', async ($, on) => {
-  const { plays, finishSpeech, spawnCount } = boot(on, { active: 'ada' })
+test('a reply that finishes unhurried is followed by the "your turn" chime, and its late echo is still not a prompt', async ($, on) => {
+  const { plays, finishSpeech, spawnCount, submitted, hear } = boot(on, { active: 'ada' })
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
   await run($, 'talk')
   await settle(() => spawnCount() === 1)
-  await $.turn.complete({ turnId: 't1', answer: 'All done.', durationMs: 10, isAborted: false, reason: 'answer' })
+  await $.turn.complete({ turnId: 't1', answer: 'All done. Night.', durationMs: 10, isAborted: false, reason: 'answer' })
   await settle(() => false)
   finishSpeech()
   await settle(() => plays.length === 2)
   expect(plays).toEqual(['sounds/chime.wav', 'sounds/chime.wav'])
+
+  // the recognizer reports what it heard of the speech only after the speaker went quiet
+  hear('all done night')
+  await settle(() => spawnCount() === 2)
+  expect(submitted).toEqual([])
+  hear('night')
+  await settle(() => spawnCount() === 3)
+  expect(submitted).toEqual([])
+
+  // a human sentence after it still lands
+  hear('good what about the docs')
+  await settle(() => submitted.length === 1)
+  expect(submitted[0]?.text).toBe('good what about the docs')
   await run($, 'talk')
   await settle(() => false)
 })
