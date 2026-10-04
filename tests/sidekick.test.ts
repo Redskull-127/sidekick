@@ -120,8 +120,9 @@ function boot(on: On, seed: Record<string, unknown> = {}, sayVoices = 'Samantha 
 }
 
 /** Runs /sidekick <args> as the person would. */
-const run = ($: Engine, args: string) =>
-  $.command.run({ command: 'sidekick', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
+function run($: Engine, args: string) {
+  return $.command.run({ command: 'sidekick', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
+}
 
 /** Lets work the mod left running catch up. */
 async function settle(done: () => boolean) {

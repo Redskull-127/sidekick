@@ -557,7 +557,7 @@ export const register: Register = (on, options) => {
     return next({ ...e, props: { ...e.props, tail: ` · 🎙 talking with ${p.name}` } })
   })
 
-  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+  on('ui.render', { component: 'Pane', requestId: 'sidekick' }, async ($, e) => {
     const { Box, Button, Text } = $.ui.resolve(e)
     const list: Persona[] = (await $.state.get(roster)).value ?? []
     const cur = ((await $.state.get(active)).value ?? null)
