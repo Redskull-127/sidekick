@@ -32,6 +32,18 @@ export function bestVoice(base: string, installed: string[]): string {
 }
 
 export const hasNaturalVoice = (installed: string[]) => installed.some(v => /\((Premium|Enhanced)\)$/.test(v))
+
+/**
+ * What to store when someone names a voice: a known base name ("ava" → "Ava"), or an installed
+ * voice's exact name ("Ava (Premium)", "Karen"). Undefined when it is neither.
+ */
+export function pickVoice(name: string, installed: string[]): string | undefined {
+  const want = name.trim().toLowerCase()
+  if (!want) return undefined
+  const base = VOICES.find(v => v.toLowerCase() === want)
+  if (base) return base
+  return installed.find(v => v.toLowerCase() === want || v.toLowerCase().replace(/ \((premium|enhanced)\)$/, '') === want)
+}
 export const COLORS = ['cyan', 'magenta', 'green', 'yellow', 'blue', 'red'] as const
 
 export const PRESETS: Persona[] = [

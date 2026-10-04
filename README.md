@@ -32,6 +32,7 @@ Two sidekicks ship so it works before you create anyone: **Ada** (calm staff eng
 | `/sidekick talk` | Toggle hands-free talk mode (voice in, voice out) |
 | `/sidekick mute` / `/sidekick speak` | Toggle spoken replies |
 | `/sidekick voices` / `/sidekick voices install` | Show which Apple voices are installed; open the pane to download natural ones |
+| `/sidekick voice <voice>` / `/sidekick voice <name> <voice>` | Give the active sidekick, or a named one, a voice (`/sidekick voice Ava`) |
 | `/sidekick list` / `/sidekick rm <name>` | Housekeeping |
 
 Sidekicks, the active one, and mute/talk state persist across sessions in the plugin's store. The `Speak replies` option in `/config` sets the default.
@@ -39,6 +40,8 @@ Sidekicks, the active one, and mute/talk state persist across sessions in the pl
 ## Voices
 
 macOS ships compact voices that sound robotic. Apple's natural **Premium** and **Enhanced** voices are a one-time download: run `/sidekick voices install`, or go to System Settings → Accessibility → Spoken Content → System Voice → ⓘ Manage Voices → English, and download **Ava (Premium)**, **Tom (Enhanced)**, or any voice marked Premium or Enhanced. Sidekicks use the best installed variant of their voice automatically (Premium, then Enhanced, then any natural voice, then the compact stand-in), so nothing else to configure.
+
+To give a sidekick a different voice: `/sidekick voice Ava` for the active one, or `/sidekick voice Rudy Ava` for a named one. Any of the sixteen natural names works, and so does the exact name of any voice `say -v ?` lists. The sidekick confirms by saying its catchphrase in the new voice. The choice is saved with the persona.
 
 ## Requirements
 

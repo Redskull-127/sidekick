@@ -1,6 +1,6 @@
 {
   "name": "sidekick",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Persona agents you can talk to: create a sidekick, it explains, does and fixes things in character, asks when it needs you, and speaks its replies.",
   "author": { "name": "Meer Tarbani" },
   "homepage": "https://github.com/Redskull-127/sidekick",

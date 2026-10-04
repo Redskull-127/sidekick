@@ -3,7 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Persona, SidekickQuestion } from '../types'
 import { CHIME_OFF, CHIME_ON } from './chime'
 import { LISTENER_PLIST, LISTENER_SWIFT } from './listener-source'
-import { GEN_SYSTEM, PRESETS, VOICES, askAloud, bestVoice, contract, foreignWords, hasNaturalVoice, parseGenerated, parseSayVoices, pickOption, spoken, stripEcho } from './persona'
+import { GEN_SYSTEM, PRESETS, VOICES, askAloud, bestVoice, contract, foreignWords, hasNaturalVoice, parseGenerated, parseSayVoices, pickOption, pickVoice, spoken, stripEcho } from './persona'
 
 const PANE = 'sidekick'
 // session state the drawings read; each a literal reference for `$.state`
@@ -23,6 +23,7 @@ const USAGE = [
   '/sidekick talk            hands-free: speak, it answers, it listens again',
   '/sidekick mute | speak',
   '/sidekick voices [install]  natural Apple voices',
+  '/sidekick voice <voice>     give the active sidekick a voice (or: voice <name> <voice>)',
   '/sidekick list | rm <name>',
 ].join('\n')
 
@@ -49,8 +50,11 @@ async function loadVoices($: EngineInterface) {
 /** Store → state, at session start and after /clear, /resume, /branch. */
 async function load($: EngineInterface, speakByDefault: boolean) {
   const saved = (await $.store.get('personas')) as Persona[] | undefined
-  // our presets keep our voice choices; personas the person made keep theirs
-  const list = (saved && saved.length > 0 ? saved : PRESETS).map(p => ({ ...p, voice: PRESETS.find(x => x.id === p.id)?.voice ?? p.voice }))
+  // presets saved by an earlier version with the compact voices move to the natural ones once; a voice the person chose stays
+  const list = (saved && saved.length > 0 ? saved : PRESETS).map(p => {
+    const preset = PRESETS.find(x => x.id === p.id)
+    return preset && (p.voice === 'Samantha' || p.voice === 'Daniel') ? { ...p, voice: preset.voice } : p
+  })
   if (!saved) await $.store.set('personas', list)
   const activeId = (await $.store.get('active')) as string | null | undefined
   const muted = (await $.store.get('isMuted')) as boolean | undefined
@@ -399,6 +403,26 @@ export const register: Register = (on, options) => {
           natural.length > 0 ? '' : `/sidekick voices install opens the download pane.\n${VOICE_STEPS}`,
         ]
         return { text: lines.filter(Boolean).join('\n') }
+      }
+      case 'voice': {
+        const cur = (await $.state.get(active)).value ?? null
+        // "voice Ava" is the active sidekick; "voice Rudy Ava" names one
+        const target = rest.length > 1 ? findPersona(list, rest[0]!) : cur
+        const wanted = rest.length > 1 ? rest.slice(1).join(' ') : arg
+        if (!target) return { text: rest.length > 1 ? `No sidekick named "${rest[0]}".` : 'Pick a sidekick first: /sidekick use Rudy' }
+        if (!wanted) return { text: `${target.glyph} ${target.name} speaks as ${bestVoice(target.voice, installedVoices)}. Choose from: ${VOICES.join(', ')}, or any installed voice (/sidekick voices).` }
+        await loadVoices($)
+        const voice = pickVoice(wanted, installedVoices)
+        if (!voice) return { text: `No voice called "${wanted}". Choose from: ${VOICES.join(', ')}, or any installed voice (/sidekick voices).` }
+        const changed = { ...target, voice }
+        const grown = list.map(x => (x.id === target.id ? changed : x))
+        await $.state.set(roster, grown)
+        await $.store.set('personas', grown)
+        if (cur?.id === target.id) await $.state.set(active, changed)
+        const resolved = bestVoice(voice, installedVoices)
+        const standIn = resolved === voice || resolved.startsWith(`${voice} (`) ? '' : ` (${voice} isn't installed here, so this stands in.)`
+        if (!(await $.state.get(isMuted)).value) void say($, changed.tagline, voice)
+        return { text: `${changed.glyph} ${changed.name} now speaks as ${resolved}.${standIn}` }
       }
       case 'mute':
       case 'speak': {

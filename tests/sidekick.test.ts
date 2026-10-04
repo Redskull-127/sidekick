@@ -332,6 +332,34 @@ test('a downloaded natural voice is used as soon as it is installed', async ($, 
   expect(listing.text).toContain('Ada speaks as Ava (Premium)')
 })
 
+test('/sidekick voice gives a persona a voice, and it sticks across loads', async ($, on) => {
+  const { saved, spokenVoices, spokenTexts, finishSpeech } = boot(on, { active: 'rudy' }, 'Ava (Premium)        en_US    # Hello\nTom (Enhanced)       en_US    # Hello\nSamantha             en_US    # Hello')
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+
+  const answer = await run($, 'voice Ava')
+  expect(answer.text).toBe('🦊 Rudy now speaks as Ava (Premium).')
+  await settle(() => spokenVoices.length > 0)
+  // the catchphrase is read in the new voice as confirmation
+  expect(spokenTexts[0]).toBe('Ship it or delete it.')
+  expect(spokenVoices[0]).toBe('Ava (Premium)')
+  finishSpeech()
+  await settle(() => false)
+  expect((saved.get('personas') as Persona[]).find(p => p.id === 'rudy')?.voice).toBe('Ava')
+
+  // a second load keeps the chosen voice instead of restoring the preset's
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await $.turn.complete({ turnId: 't1', answer: 'Done.', durationMs: 10, isAborted: false, reason: 'answer' })
+  await settle(() => spokenVoices.length > 1)
+  expect(spokenVoices[1]).toBe('Ava (Premium)')
+  finishSpeech()
+  await settle(() => false)
+
+  expect((await run($, 'voice Rudy HAL')).text).toContain('No voice called "HAL"')
+  // Karen is a known name but not installed in this stub, so the best natural voice stands in, and the reply says so
+  expect((await run($, 'voice Ada Karen')).text).toBe("🧭 Ada now speaks as Ava (Premium). (Karen isn't installed here, so this stands in.)")
+  await settle(() => false)
+})
+
 test('the active persona adds its section to the system prompt', async ($, on) => {
   boot(on, { active: 'rudy' })
   on('prompt.compose', () => ({ sections: [{ id: 'intro', text: 'You are Claude Code.', scope: 'shared' }] }))
