@@ -1,0 +1,5 @@
+# laid by Claude Code beside a loaded mod
+.claude-plugin/types/
+tsconfig.json
+node_modules
+.DS_Store
