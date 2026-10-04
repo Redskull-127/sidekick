@@ -50,7 +50,7 @@ macOS ships compact voices that sound robotic. Apple's natural **Premium** and *
 ## Install
 
 ```sh
-claude plugin marketplace add meertarbani/sidekick
+claude plugin marketplace add Redskull-127/sidekick
 claude plugin install sidekick@meer-mods
 ```
 
