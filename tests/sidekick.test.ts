@@ -3,7 +3,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import type { Persona } from '../types'
-import { parseGenerated, pickOption, spoken, stripEcho } from '../hooks/persona'
+import { foreignWords, parseGenerated, pickOption, spoken, stripEcho } from '../hooks/persona'
 
 const USAGE = { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
 
@@ -47,6 +47,11 @@ function boot(on: On, seed: Record<string, unknown> = {}) {
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.toast', () => ({ value: undefined }))
   on('ui.render', () => ({ type: 'Text', props: {}, children: ['drawn by Claude Code'] }))
+  const plays: string[] = []
+  on('audio.play', ($, e) => {
+    plays.push(e.clip.asset ?? '')
+    return { value: undefined }
+  })
   on('session.start', () => ({ cwd: '/work' }))
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: '' }))
@@ -107,7 +112,7 @@ function boot(on: On, seed: Record<string, unknown> = {}) {
     return { value: { code: 0, signal: null } }
   })
 
-  return { saved, spokenTexts, runs, submitted, aborted, clock, hear: (s: string) => feed(s), finishSpeech, spawnCount: () => spawns }
+  return { saved, spokenTexts, plays, runs, submitted, aborted, clock, hear: (s: string) => feed(s), finishSpeech, spawnCount: () => spawns }
 }
 
 /** Runs /sidekick <args> as the person would. */
@@ -119,8 +124,8 @@ async function settle(done: () => boolean) {
   for (let i = 0; i < 4000 && !done(); i++) await Promise.resolve()
 }
 
-test('/sidekick new creates a persona, activates it and greets aloud', async ($, on) => {
-  const { saved, spokenTexts, finishSpeech } = boot(on)
+test('/sidekick new creates a persona, activates it and chimes', async ($, on) => {
+  const { saved, spokenTexts, plays } = boot(on)
   on('model.complete', () => ({ value: { isAnswered: true, text: 'Here you go:\n' + JSON.stringify(NOVA), usage: USAGE } }))
 
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
@@ -130,10 +135,9 @@ test('/sidekick new creates a persona, activates it and greets aloud', async ($,
   const roster = saved.get('personas') as Persona[]
   expect(roster.map(p => p.id)).toEqual(['ada', 'rudy', 'nova'])
   expect(saved.get('active')).toBe('nova')
-  await settle(() => spokenTexts.length > 0)
-  expect(spokenTexts[0]).toBe('Nova here. Fast, then correct.')
-  finishSpeech()
-  await settle(() => false)
+  await settle(() => plays.length > 0)
+  expect(plays).toEqual(['sounds/chime.wav'])
+  expect(spokenTexts).toEqual([])
 })
 
 test('a finished turn is spoken short, in the persona voice, unless muted', async ($, on) => {
@@ -153,49 +157,65 @@ test('a finished turn is spoken short, in the persona voice, unless muted', asyn
   expect(spokenTexts).toEqual(['Fixed the build.'])
 })
 
-test('talk mode: you speak, it sends; you talk over it, it stops; its echo is ignored; "end talk" ends', async ($, on) => {
-  const { spokenTexts, submitted, runs, hear, finishSpeech, saved, spawnCount } = boot(on, { active: 'ada' })
+test('talk mode: chime, you speak, it sends; its echo is ignored; you talk over it, it stops; "end talk" ends', async ($, on) => {
+  const { spokenTexts, plays, submitted, runs, hear, saved, spawnCount } = boot(on, { active: 'ada' })
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
 
   const answer = await run($, 'talk')
   expect(answer.text).toContain('Talk mode on')
-  await settle(() => spawnCount() === 1 && spokenTexts.length === 1)
-  expect(spokenTexts[0]).toBe("Ada here. I'm listening.")
+  await settle(() => spawnCount() === 1 && plays.length === 1)
+  expect(plays).toEqual(['sounds/chime.wav'])
+  expect(spokenTexts).toEqual([])
 
-  // barge-in: two words that are not Ada's own cut her greeting short, and the sentence is sent
   hear('refactor the auth middleware')
   await settle(() => submitted.length === 1)
-  expect(runs).toContain('killall say')
   expect(submitted[0]).toEqual({ text: 'refactor the auth middleware', asUser: true })
 
   // the reply is spoken; what the microphone hears of it is not a prompt
   await settle(() => spawnCount() === 2)
   await $.turn.complete({ turnId: 't1', answer: 'Done, the tests pass.\n\nAll three suites are green.\n\n---\n\n```ts\nconst x = 1\n```', durationMs: 10, isAborted: false, reason: 'answer' })
-  await settle(() => spokenTexts.length === 2)
-  expect(spokenTexts[1]).toBe('Done, the tests pass. All three suites are green.')
+  await settle(() => spokenTexts.length === 1)
+  expect(spokenTexts[0]).toBe('Done, the tests pass. All three suites are green.')
   hear('done the tests pass all three suites are green')
   await settle(() => spawnCount() === 3)
   expect(submitted.length).toBe(1)
-  finishSpeech()
 
-  // a real follow-up after the speech
+  // barge-in: two words that are not Ada's cut her off, and the sentence is sent
+  expect(runs).not.toContain('killall say')
   hear('what about the docs')
   await settle(() => submitted.length === 2)
+  expect(runs).toContain('killall say')
   expect(submitted[1]?.text).toBe('what about the docs')
+  // cut off, so no "your turn" chime
+  expect(plays).toEqual(['sounds/chime.wav'])
 
-  // "end talk" by voice
+  // "end talk" by voice: the lower chime, no speech
   await settle(() => spawnCount() === 4)
   hear('okay end talk please')
-  await settle(() => spokenTexts.length === 3)
-  expect(spokenTexts[2]).toBe('Talk mode off.')
-  finishSpeech()
+  await settle(() => plays.length === 2)
+  expect(plays[1]).toBe('sounds/chime-off.wav')
   await settle(() => false)
+  expect(spokenTexts.length).toBe(1)
   expect(submitted.length).toBe(2)
   expect(saved.get('isTalk')).toBeUndefined()
 
   const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect(await band.find({ type: 'Text', text: /is ready/ })).toBeUndefined()
   await band.unmount()
+})
+
+test('a reply that finishes unhurried is followed by the "your turn" chime', async ($, on) => {
+  const { plays, finishSpeech, spawnCount } = boot(on, { active: 'ada' })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await run($, 'talk')
+  await settle(() => spawnCount() === 1)
+  await $.turn.complete({ turnId: 't1', answer: 'All done.', durationMs: 10, isAborted: false, reason: 'answer' })
+  await settle(() => false)
+  finishSpeech()
+  await settle(() => plays.length === 2)
+  expect(plays).toEqual(['sounds/chime.wav', 'sounds/chime.wav'])
+  await run($, 'talk')
+  await settle(() => false)
 })
 
 test('"stop" while it works aborts the turn instead of queuing a prompt', async ($, on) => {
@@ -221,7 +241,7 @@ test('"stop" while it works aborts the turn instead of queuing a prompt', async 
 })
 
 test('pressing talk again and again toggles; it never stacks greetings or listeners', async ($, on) => {
-  const { spokenTexts, spawnCount, saved, finishSpeech } = boot(on, { active: 'rudy' })
+  const { spokenTexts, plays, spawnCount } = boot(on, { active: 'rudy' })
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
 
   const pane = await $.ui.mount({
@@ -236,12 +256,11 @@ test('pressing talk again and again toggles; it never stacks greetings or listen
   await pane.press({ key: 'talk' })
   await pane.press({ key: 'talk' })
   await settle(() => spawnCount() === 2)
-  expect(saved.get('isTalk')).toBeUndefined()
-  // on, off, on: two greetings, the first cut by the second press; one listener alive
-  expect(spokenTexts.filter(t => t.includes("I'm listening")).length).toBe(2)
+  // on, off, on: chime, off-chime, chime; nothing spoken; one listener alive
+  expect(plays).toEqual(['sounds/chime.wav', 'sounds/chime-off.wav', 'sounds/chime.wav'])
+  expect(spokenTexts).toEqual([])
   expect(spawnCount()).toBe(2)
   await pane.press({ key: 'talk' })
-  finishSpeech()
   await settle(() => false)
   await pane.unmount()
 })
@@ -305,6 +324,10 @@ test('persona helpers: parse, spoken, echo, options', () => {
   expect(stripEcho('the tests are green hey can you check the logs', speech)).toBe('hey can you check the logs')
   expect(stripEcho('check the logs please', speech)).toBe('check the logs please')
   expect(stripEcho('anything', '')).toBe('anything')
+  expect(stripEcho('done the', 'Done, the tests pass.')).toBe('')
+  expect(stripEcho('tests pass yes please', 'Done, the tests pass.')).toBe('yes please')
+  expect(foreignWords('done the', 'Done, the tests pass.')).toBe(0)
+  expect(foreignWords('done the hey rudy', 'Done, the tests pass.')).toBe(2)
 
   const labels = ['Run it', 'Refuse', 'Ask me later']
   expect(pickOption('the second one', labels, false)).toBe('Refuse')

@@ -76,9 +76,17 @@ const tokens = (s: string) => s.toLowerCase().replace(/[^a-z0-9'\s]/g, ' ').spli
 
 const NEUTRAL = new Set(['the', 'a', 'an', 'and', 'is', 'are', 'to', 'of', 'it', 'in', 'on', 'that', 'this', 'i', 'you'])
 
-/** Drops the words at the start of a transcript that are the sidekick's own speech coming back through the microphone. */
+/** How many words of a transcript are not in the sidekick's speech at all: the human's words. */
+export function foreignWords(transcript: string, speech: string): number {
+  const said = new Set(tokens(speech))
+  return tokens(transcript).filter(w => !NEUTRAL.has(w) && !said.has(w)).length
+}
+
+/** Drops the sidekick's own speech coming back through the microphone; what is left is the human. */
 export function stripEcho(transcript: string, speech: string): string {
   if (!speech) return transcript.trim()
+  const foreign = foreignWords(transcript, speech)
+  if (foreign === 0) return ''
   const said = new Set(tokens(speech))
   const heard = tokens(transcript)
   let matched = 0
@@ -95,9 +103,11 @@ export function stripEcho(transcript: string, speech: string): string {
       if (misses >= 2) break
     }
   }
-  // fewer than two of its own words at the start: this is the human, keep it whole
+  // fewer than two of its own words: this is the human, keep it whole
   if (matched < 2) return transcript.trim()
-  return misses >= 2 || cut < heard.length ? heard.slice(misses >= 2 ? cut : heard.length).join(' ') : ''
+  // its own words with one misheard: still its echo
+  if (foreign <= 1) return ''
+  return cut < heard.length ? heard.slice(cut).join(' ') : transcript.trim()
 }
 
 /** The system-prompt section the active persona adds. */

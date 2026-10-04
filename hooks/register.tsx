@@ -3,7 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { Persona, SidekickQuestion } from '../types'
 import { LISTENER_PLIST, LISTENER_SWIFT, LISTENER_VERSION } from './listener-src'
-import { GEN_SYSTEM, PRESETS, askAloud, contract, parseGenerated, pickOption, spoken, stripEcho } from './persona'
+import { GEN_SYSTEM, PRESETS, askAloud, contract, foreignWords, parseGenerated, pickOption, spoken, stripEcho } from './persona'
 
 const PANE = 'sidekick'
 const roster = atom({ plugin: 'sidekick', key: 'roster' } as const, [] as Persona[])
@@ -79,7 +79,12 @@ async function say($: EngineInterface, text: string, voice: string) {
   if (sayId !== mine) return
   speechNow = ''
   await update($, isSpeaking, () => false)
+  if (!isHushed && (await read($, isTalk))) void chime($)
 }
+
+/** The cabin chime: "a sidekick is on" and "your turn"; the lower one when talk mode ends. */
+const chime = ($: EngineInterface, kind: 'on' | 'off' = 'on') =>
+  $.audio.play({ asset: kind === 'off' ? 'sounds/chime-off.wav' : 'sounds/chime.wav' }).catch(() => {})
 
 // ponytail: `say` has no abort; killing the macOS synthesizer is the one-line skip
 async function hush($: EngineInterface) {
@@ -158,7 +163,8 @@ async function listen($: EngineInterface, bin: string): Promise<Heard> {
         if (line.startsWith('partial:')) {
           const own = stripEcho(line.slice(8), echo)
           await update($, heard, () => own)
-          if (speechNow && !bargedIn && own.split(' ').filter(Boolean).length >= 2) {
+          // ponytail: two words that are not in its own speech mean the human is talking over it
+          if (speechNow && !bargedIn && foreignWords(line.slice(8), echo) >= 2) {
             bargedIn = true
             void hush($)
           }
@@ -182,10 +188,12 @@ async function listen($: EngineInterface, bin: string): Promise<Heard> {
 }
 
 async function setTalk($: EngineInterface, enabled: boolean) {
+  const was = await read($, isTalk)
   await update($, isTalk, () => enabled)
   if (!enabled) {
     await stopListening($)
     await update($, question, () => null)
+    if (was) void chime($, 'off')
   }
 }
 
@@ -219,12 +227,11 @@ async function runEar($: EngineInterface) {
     }
     quiet = 0
     const said = r.text
+    if (await read($, isSpeaking)) await hush($)
     if (END_TALK.test(said)) {
       await setTalk($, false)
-      if (!(await read($, isMuted))) void say($, 'Talk mode off.', p.voice)
       return
     }
-    await hush($)
     if (STOP.test(said)) {
       if (runningTurn) await $.turn.abort({ turnId: runningTurn }).catch(() => {})
       continue
@@ -237,7 +244,7 @@ async function runEar($: EngineInterface) {
 async function startTalk($: EngineInterface) {
   const p = await read($, active)
   if (!p) return
-  if (!(await read($, isMuted))) void say($, `${p.name} here. I'm listening.`, p.voice)
+  void chime($)
   if (earLoop) return
   earLoop = runEar($)
     .catch(() => {
@@ -306,7 +313,7 @@ export const register: Register = (on, options) => {
         await $.store.set('personas', grown)
         await setActive($, p)
         void $.ui.open({ id: PANE, title: 'Sidekick' })
-        if (!(await read($, isMuted))) void say($, `${p.name} here. ${p.tagline}`, p.voice)
+        void chime($)
         return { text: `${p.glyph} ${p.name} is ready. "${p.tagline}"\n${p.name} is driving now. /sidekick talk to speak with ${p.name}.` }
       }
       case 'use': {
@@ -314,7 +321,7 @@ export const register: Register = (on, options) => {
         if (!p) return { text: `No sidekick named "${arg}". /sidekick list` }
         await setActive($, p)
         void $.ui.open({ id: PANE, title: 'Sidekick' })
-        if (!(await read($, isMuted))) void say($, `${p.name} here. ${p.tagline}`, p.voice)
+        void chime($)
         return { text: `${p.glyph} ${p.name} is driving now.` }
       }
       case 'off': {

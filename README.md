@@ -10,7 +10,7 @@ Persona agents you can talk to inside Claude Code. A sidekick is the one driving
   🎙 Talk mode on. Just speak; Rudy answers out loud and listens again.
 ```
 
-Two sidekicks ship so it works before you create anyone: **Ada** (calm staff engineer) and **Rudy** (blunt senior dev).
+Two sidekicks ship so it works before you create anyone: **Ada** (calm staff engineer) and **Rudy** (blunt senior dev). A sidekick never announces itself by voice; a cabin-style chime says "on" and "your turn", and a lower one says talk mode ended. The name is in the terminal header.
 
 ## What changes in your session
 
