@@ -50,13 +50,13 @@ macOS ships compact voices that sound robotic. Apple's natural **Premium** and *
 ## Install
 
 ```sh
-claude plugin marketplace add meertarbani/voice-agent
+claude plugin marketplace add meertarbani/sidekick
 claude plugin install sidekick@meer-mods
 ```
 
-Or for one session: `claude --plugin-dir /path/to/voice-agent`.
+Or for one session: `claude --plugin-dir /path/to/sidekick`.
 
-Before installing any mod, you can list what it hooks and calls without running it: `claude plugin validate /path/to/voice-agent`.
+Before installing any mod, you can list what it hooks and calls without running it: `claude plugin validate /path/to/sidekick`.
 
 ## Develop
 
