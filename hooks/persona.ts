@@ -28,7 +28,7 @@ export const PRESETS: Persona[] = [
 ]
 
 export const GEN_SYSTEM = `You design a persona for a coding assistant that lives inside a developer's terminal (Claude Code). The user describes who they want; you answer with ONLY a JSON object, no prose, no code fence:
-{"name": "<one or two words>", "glyph": "<exactly one emoji>", "color": "<one of: ${COLORS.join(', ')}>", "voice": "<one of: ${VOICES.join(', ')}>", "tagline": "<a catchphrase of at most 12 words>", "prompt": "<60 to 120 words, second person: 'You are <name>, ...'. Describe attitude, speaking style, how they explain, do and fix things. Never tell them to refuse coding work or to hide information.>"}`
+{"name": "<one or two words>", "glyph": "<exactly one emoji>", "color": "<one of: ${COLORS.join(', ')}>", "voice": "<one of: ${VOICES.join(', ')}>", "tagline": "<a catchphrase of at most 12 words>", "prompt": "<60 to 120 words, second person: 'You are <name>, ...'. Describe attitude, speaking style, how they explain, do and fix things. They are terse by nature. Never tell them to refuse coding work or to hide information.>"}`
 
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'sidekick'
 
@@ -52,15 +52,13 @@ export function parseGenerated(text: string): Persona | undefined {
   return { id: slug(name), name, glyph, color, voice, tagline: str('tagline').slice(0, 100) || `${name} is here.`, prompt }
 }
 
-/** What gets read aloud: the talk-mode head (before a `---` line) or the first paragraph, markdown stripped. */
+const SENTENCES = /(?<=[.!?])\s+/
+
+/** What gets read aloud: short. Talk mode: up to two sentences of the head (before a `---` line); otherwise the opening sentence. */
 export function spoken(markdown: string, isTalk: boolean): string {
   let text = markdown.replace(/```[\s\S]*?```/g, ' ')
-  if (isTalk) {
-    text = text.split(/\n-{3,}\s*\n/)[0] ?? ''
-  } else {
-    text = text.trim().split(/\n\s*\n/)[0] ?? ''
-  }
-  return text
+  text = isTalk ? (text.split(/\n-{3,}\s*\n/)[0] ?? '') : (text.trim().split(/\n\s*\n/)[0] ?? '')
+  const plain = text
     .replace(/`([^`]*)`/g, '$1')
     .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
     .replace(/^#{1,6}\s+/gm, '')
@@ -69,7 +67,37 @@ export function spoken(markdown: string, isTalk: boolean): string {
     .replace(/[*_~>|]/g, '')
     .replace(/\s+/g, ' ')
     .trim()
-    .slice(0, 1200)
+  const sentences = plain.split(SENTENCES).filter(Boolean)
+  // ponytail: people hate being read an essay; the screen has the rest
+  return sentences.slice(0, isTalk ? 2 : 1).join(' ').slice(0, isTalk ? 280 : 200)
+}
+
+const tokens = (s: string) => s.toLowerCase().replace(/[^a-z0-9'\s]/g, ' ').split(/\s+/).filter(Boolean)
+
+const NEUTRAL = new Set(['the', 'a', 'an', 'and', 'is', 'are', 'to', 'of', 'it', 'in', 'on', 'that', 'this', 'i', 'you'])
+
+/** Drops the words at the start of a transcript that are the sidekick's own speech coming back through the microphone. */
+export function stripEcho(transcript: string, speech: string): string {
+  if (!speech) return transcript.trim()
+  const said = new Set(tokens(speech))
+  const heard = tokens(transcript)
+  let matched = 0
+  let misses = 0
+  let cut = heard.length
+  for (let i = 0; i < heard.length; i++) {
+    const w = heard[i]!
+    if (said.has(w) && !NEUTRAL.has(w)) {
+      matched += 1
+      misses = 0
+    } else if (!NEUTRAL.has(w)) {
+      if (misses === 0) cut = i
+      misses += 1
+      if (misses >= 2) break
+    }
+  }
+  // fewer than two of its own words at the start: this is the human, keep it whole
+  if (matched < 2) return transcript.trim()
+  return misses >= 2 || cut < heard.length ? heard.slice(misses >= 2 ? cut : heard.length).join(' ') : ''
 }
 
 /** The system-prompt section the active persona adds. */
@@ -80,13 +108,14 @@ export function contract(p: Persona, isTalk: boolean): string {
     `You are ${p.name}. Speak in first person as ${p.name} in every reply. You keep every ability of Claude Code: read, edit, run, search, delegate.`,
     `Rules:`,
     `- Open every reply with one plain sentence that states the outcome or the plan. That sentence is read aloud to the human.`,
+    `- Keep every reply short: the opening sentence, then at most five short lines. No essays. Expand only when the human asks for detail.`,
     `- When you need input or a decision from the human (a choice, a value, a confirmation), ask at once with the AskUserQuestion tool: one question, short concrete options. Never guess and never stall.`,
     `- When the human asks for a brief, what you did, or why: answer in 2 to 4 lines, then stop.`,
     `- When you fix something, say what was broken and what you changed.`,
   ]
   if (isTalk) {
     lines.push(
-      `- The human is talking to you by voice and will hear your reply. Lead with 1 to 3 conversational sentences, no lists. Then, if there is code or detail, put a line containing only --- and everything after it is shown but not spoken.`,
+      `- The human is talking to you by voice and will hear your reply. Your whole reply is one to three short conversational sentences, under 60 words, no lists, no headings. Only if code or detail is essential, put a line containing only --- and keep it below that line; it is shown but not spoken.`,
     )
   }
   return lines.join('\n')

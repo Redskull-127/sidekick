@@ -17,7 +17,8 @@ Two sidekicks ship so it works before you create anyone: **Ada** (calm staff eng
 - Every reply is headed with the sidekick's glyph and name, the spinner reads `Thinking · Rudy is on it…`, and the question dialog is headed `🦊 Rudy asks:`.
 - The sidekick is told to ask you with a short, concrete question whenever it needs input instead of guessing, to answer "brief?" in a few lines, and to say what broke and what it changed when it fixes something.
 - The opening sentence of each reply is read aloud in the sidekick's macOS voice. `/sidekick mute` turns that off.
-- **Talk mode** (`/sidekick talk`) is hands-free. The sidekick greets you and listens; when you pause it sends what you said as your prompt, works, speaks the answer, and listens again. No key to hold. A band above the prompt shows what is happening (`listening…` with the words as they are recognized, `speaking…`, `working…`) with `s` to skip the speech, `l` to listen now, `m` to mute and `x` to end. Say "end talk" to stop. Three long silences in a row end talk mode on their own.
+- **Talk mode** (`/sidekick talk`) is hands-free and continuous. The sidekick greets you and listens; when you pause it sends what you said as your prompt, works, speaks the answer, and keeps listening. No key to hold. **Talk over it to interrupt**: the moment it hears words that aren't its own, it stops speaking and takes yours as the next prompt. Say **"stop"** or "wait" while it works to cancel the turn. Say **"end talk"** to stop. A band above the prompt shows what is happening (`listening…` with the words as they are recognized, `speaking…`, `working…`) with `s` to skip the speech, `m` to mute and `x` to end. Three long silences in a row end talk mode on their own.
+- **Short answers.** Spoken replies are one sentence (two in talk mode); the persona is told to keep the whole reply to a few lines and to expand only when asked.
 - **Questions by voice.** When the sidekick needs a decision in talk mode it reads the question and the numbered options aloud, listens, and takes your answer: "the second one", "production", "yes", or a free-text answer of a few words. If it can't match what you said after two tries, the normal dialog opens and you pick with a key.
 - In talk mode the sidekick keeps the spoken part short and puts code after a `---` line that is shown but not read.
 
@@ -62,9 +63,12 @@ claude --plugin-dir .      # hot-reloads on save
 
 ## How hands-free works
 
-A mod cannot open a microphone itself, so the sidekick spawns the listener binary. It records until you pause for 1.4 seconds (or 45 seconds at most), streams the partial transcript to the band, prints the final text, and exits. The mod submits that text as your prompt. While the sidekick speaks, nothing listens, so it never hears itself. A turn you start by typing stops any listening in progress.
+A mod cannot open a microphone itself, so the sidekick spawns the listener binary, over and over, for as long as talk mode is on. Each run records until you pause for 1.4 seconds (or 60 seconds at most), streams the partial transcript to the band, prints the final text, and exits. The mod submits that text as your prompt.
 
-## Not in v1
+The listener runs while the sidekick speaks too, so you can interrupt. Its own voice comes back through the microphone, so the mod drops the leading words that match what it was saying; the first two words that aren't its own cut the speech short. The listener captures through AVFoundation and picks the system's default microphone (`bin/listen.swift --list-devices` shows them; pass `--device <name part>` in `hooks/register.tsx` to pin one).
 
-- Interrupting the sidekick by talking over it (barge-in). Press `s` to skip the speech instead.
+## Known limits
+
+- Echo is filtered by words, not by acoustics. Repeating the sidekick's own words back to it right after it says them won't register as a new prompt.
 - Languages: the listener uses your macOS locale. Pass `--lang` in `hooks/register.tsx` to pin one.
+- After editing `bin/listen.swift`, run `python3 scripts/embed-listener.py`; the binary rebuilds on next use.

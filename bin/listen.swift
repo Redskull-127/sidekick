@@ -1,7 +1,10 @@
-// sidekick-listen: records from the default microphone and prints what was said, using macOS's own
-// speech recognition. Exits when the speaker pauses for --silence seconds (after speech began),
-// or after --max seconds. stderr: "listening", "partial:<text>", "error:<why>". stdout: the final text.
-// Exit codes: 0 text, 2 nothing heard, 3 permission denied, 4 recognizer unavailable, 5 audio engine failed.
+// sidekick-listen: records from a microphone and prints what was said, using macOS's own speech
+// recognition (on-device where the language model is installed). Exits when the speaker pauses for
+// --silence seconds after speech began, or after --max seconds.
+//   stderr: "listening", "partial:<text>", "device:<name>", "note:<info>", "error:<why>"
+//   stdout: the final text
+//   exit:   0 text · 2 nothing heard · 3 permission denied · 4 recognizer unavailable · 5 no microphone
+// Flags: --silence <s> --max <s> --lang <id> --device <name part> --server --file <audio> --list-devices
 import AVFoundation
 import Foundation
 import Speech
@@ -9,12 +12,20 @@ import Speech
 var silence = 1.4
 var maxSecs = 30.0
 var lang = Locale.current.identifier
+var file: String? = nil
+var forceServer = false
+var deviceWanted: String? = nil
+var listDevices = false
 var it = CommandLine.arguments.dropFirst().makeIterator()
 while let a = it.next() {
   switch a {
   case "--silence": silence = Double(it.next() ?? "") ?? silence
   case "--max": maxSecs = Double(it.next() ?? "") ?? maxSecs
   case "--lang": lang = it.next() ?? lang
+  case "--file": file = it.next()
+  case "--server": forceServer = true
+  case "--device": deviceWanted = it.next()
+  case "--list-devices": listDevices = true
   default: break
   }
 }
@@ -23,6 +34,20 @@ func log(_ s: String) { FileHandle.standardError.write((s + "\n").data(using: .u
 func fail(_ code: Int32, _ s: String) -> Never { log("error:" + s); exit(code) }
 func spin(until ready: () -> Bool) { while !ready() { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } }
 
+func microphones() -> [AVCaptureDevice] {
+  if #available(macOS 14, *) {
+    return AVCaptureDevice.DiscoverySession(deviceTypes: [.microphone, .external], mediaType: .audio, position: .unspecified).devices
+  }
+  return AVCaptureDevice.devices(for: .audio)
+}
+
+if listDevices {
+  let fallback = AVCaptureDevice.default(for: .audio)
+  for d in microphones() { print("\(d.localizedName)\(d.uniqueID == fallback?.uniqueID ? "  (default)" : "")") }
+  exit(0)
+}
+
+// permissions: speech recognition, then the microphone (each prompts once for your terminal)
 var speech = SFSpeechRecognizer.authorizationStatus()
 if speech == .notDetermined {
   SFSpeechRecognizer.requestAuthorization { speech = $0 }
@@ -30,28 +55,52 @@ if speech == .notDetermined {
 }
 guard speech == .authorized else { fail(3, "speech recognition is not allowed for your terminal (System Settings > Privacy & Security > Speech Recognition)") }
 
-var mic = AVCaptureDevice.authorizationStatus(for: .audio)
-if mic == .notDetermined {
-  AVCaptureDevice.requestAccess(for: .audio) { mic = $0 ? .authorized : .denied }
-  spin { mic != .notDetermined }
+if file == nil {
+  var mic = AVCaptureDevice.authorizationStatus(for: .audio)
+  if mic == .notDetermined {
+    AVCaptureDevice.requestAccess(for: .audio) { mic = $0 ? .authorized : .denied }
+    spin { mic != .notDetermined }
+  }
+  guard mic == .authorized else { fail(3, "microphone is not allowed for your terminal (System Settings > Privacy & Security > Microphone)") }
 }
-guard mic == .authorized else { fail(3, "microphone is not allowed for your terminal (System Settings > Privacy & Security > Microphone)") }
 
 guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: lang)), recognizer.isAvailable else {
   fail(4, "speech recognizer unavailable for \(lang)")
 }
-let request = SFSpeechAudioBufferRecognitionRequest()
+let onDevice = recognizer.supportsOnDeviceRecognition && !forceServer
+let request: SFSpeechRecognitionRequest = file.map { SFSpeechURLRecognitionRequest(url: URL(fileURLWithPath: $0)) } ?? SFSpeechAudioBufferRecognitionRequest()
 request.shouldReportPartialResults = true
-request.requiresOnDeviceRecognition = recognizer.supportsOnDeviceRecognition
+request.requiresOnDeviceRecognition = onDevice
 if #available(macOS 13, *) { request.addsPunctuation = true }
 
-let engine = AVAudioEngine()
-let input = engine.inputNode
-let format = input.outputFormat(forBus: 0)
-guard format.sampleRate > 0 else { fail(5, "no audio input device") }
-input.installTap(onBus: 0, bufferSize: 2048, format: format) { buffer, _ in request.append(buffer) }
-engine.prepare()
-do { try engine.start() } catch { fail(5, "audio engine: \(error.localizedDescription)") }
+// the microphone, through AVFoundation capture (the path ffmpeg and the camera apps use)
+final class Sink: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate {
+  let request: SFSpeechAudioBufferRecognitionRequest
+  init(_ request: SFSpeechAudioBufferRecognitionRequest) { self.request = request }
+  func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+    request.appendAudioSampleBuffer(sampleBuffer)
+  }
+}
+var session: AVCaptureSession? = nil
+var sink: Sink? = nil
+if file == nil {
+  let all = microphones()
+  let device = deviceWanted.flatMap { want in all.first { $0.localizedName.lowercased().contains(want.lowercased()) } }
+    ?? AVCaptureDevice.default(for: .audio)
+    ?? all.first
+  guard let device, let input = try? AVCaptureDeviceInput(device: device) else { fail(5, "no microphone found") }
+  log("device:\(device.localizedName)")
+  let s = AVCaptureSession()
+  let out = AVCaptureAudioDataOutput()
+  let k = Sink(request as! SFSpeechAudioBufferRecognitionRequest)
+  out.setSampleBufferDelegate(k, queue: DispatchQueue(label: "sidekick.listen"))
+  guard s.canAddInput(input), s.canAddOutput(out) else { fail(5, "microphone cannot be captured") }
+  s.addInput(input)
+  s.addOutput(out)
+  s.startRunning()
+  session = s
+  sink = k
+}
 
 var transcript = ""
 var lastChange = Date()
@@ -75,9 +124,8 @@ spin {
     || (!transcript.isEmpty && now.timeIntervalSince(lastChange) > silence)
     || now.timeIntervalSince(started) > maxSecs
 }
-engine.stop()
-input.removeTap(onBus: 0)
-request.endAudio()
+session?.stopRunning()
+(request as? SFSpeechAudioBufferRecognitionRequest)?.endAudio()
 task.cancel()
 if transcript.isEmpty { exit(2) }
 print(transcript)

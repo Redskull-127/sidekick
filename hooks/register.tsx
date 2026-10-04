@@ -3,7 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { Persona, SidekickQuestion } from '../types'
 import { LISTENER_PLIST, LISTENER_SWIFT, LISTENER_VERSION } from './listener-src'
-import { GEN_SYSTEM, PRESETS, askAloud, contract, parseGenerated, pickOption, spoken } from './persona'
+import { GEN_SYSTEM, PRESETS, askAloud, contract, parseGenerated, pickOption, spoken, stripEcho } from './persona'
 
 const PANE = 'sidekick'
 const roster = atom({ plugin: 'sidekick', key: 'roster' } as const, [] as Persona[])
@@ -25,6 +25,7 @@ const USAGE = [
 ].join('\n')
 
 const END_TALK = /\b(end talk|stop talking|stop listening|that'?s all|goodbye)\b/i
+const STOP = /^(stop|wait|hold on|hang on|never ?mind|shut up|quiet)\b/i
 
 /** Store → state, at session start and after /clear, /resume, /branch. */
 async function load($: EngineInterface, speakByDefault: boolean) {
@@ -52,24 +53,39 @@ async function toggleMute($: EngineInterface) {
   return muted
 }
 
-/** Speaks in the persona's voice; falls back to the default voice, then to silence. */
+let speechNow = ''
+let sayId = 0
+let isHushed = false
+
+/** Speaks in the persona's voice, cutting any speech still going; falls back to the default voice, then to silence. */
 async function say($: EngineInterface, text: string, voice: string) {
   if (!text) return
+  if (await read($, isSpeaking)) await hush($)
+  const mine = ++sayId
+  isHushed = false
+  speechNow = text
   await update($, isSpeaking, () => true)
   try {
     await $.audio.speak(text, { voice })
   } catch {
-    try {
-      await $.audio.speak(text)
-    } catch {
-      // no synthesizer on this platform: text only
+    if (!isHushed) {
+      try {
+        await $.audio.speak(text)
+      } catch {
+        // no synthesizer on this platform: text only
+      }
     }
   }
+  if (sayId !== mine) return
+  speechNow = ''
   await update($, isSpeaking, () => false)
 }
 
 // ponytail: `say` has no abort; killing the macOS synthesizer is the one-line skip
-const hush = ($: EngineInterface) => $.process.run(['killall', 'say']).catch(() => {})
+async function hush($: EngineInterface) {
+  isHushed = true
+  await $.process.run(['killall', 'say']).catch(() => {})
+}
 
 // ── the listener: macOS speech recognition in a small native binary, built once ─────────────────
 
@@ -100,11 +116,14 @@ async function listenerPath($: EngineInterface): Promise<string | null> {
   }
 }
 
-type Heard = { text: string | null; isCancelled: boolean; isFatal: boolean }
+type Heard = { text: string | null; isCancelled: boolean; isFatal: boolean; isEcho: boolean }
 
 let listening: { bin: string; isCancelled: boolean } | null = null
+let earLoop: Promise<void> | null = null
+let earPaused = false
+let runningTurn: string | null = null
 
-/** Stops the listener now, from a key press or because a turn started. */
+/** Stops the listener now, from a key press or because talk mode ended. */
 async function stopListening($: EngineInterface) {
   const current = listening
   if (!current) return
@@ -113,7 +132,10 @@ async function stopListening($: EngineInterface) {
   await $.process.run(['pkill', '-f', current.bin]).catch(() => {})
 }
 
-/** Records one utterance and returns its text; shows the partial transcript in the band meanwhile. */
+/**
+ * Records one utterance and returns its text. The sidekick's own voice coming back through the
+ * microphone is filtered out by its words; the first words that are not its own cut the speech short.
+ */
 async function listen($: EngineInterface, bin: string): Promise<Heard> {
   if (listening) await stopListening($)
   const run = { bin, isCancelled: false }
@@ -122,16 +144,25 @@ async function listen($: EngineInterface, bin: string): Promise<Heard> {
   await update($, isListening, () => true)
   let out = ''
   let code: number | null = null
+  let echo = speechNow
+  let bargedIn = false
   try {
-    const child = $.process.spawn({ argv: [bin, '--silence', '1.4', '--max', '45'] })
+    const child = $.process.spawn({ argv: [bin, '--silence', '1.4', '--max', '60'] })
     for await (const { stream, text } of child) {
+      if (speechNow) echo = speechNow
       if (stream === 'stdout') {
         out += text
         continue
       }
       for (const line of text.split('\n')) {
-        if (line.startsWith('partial:')) await update($, heard, () => line.slice(8))
-        else if (line.startsWith('error:')) $.ui.toast(`Listener: ${line.slice(6)}`)
+        if (line.startsWith('partial:')) {
+          const own = stripEcho(line.slice(8), echo)
+          await update($, heard, () => own)
+          if (speechNow && !bargedIn && own.split(' ').filter(Boolean).length >= 2) {
+            bargedIn = true
+            void hush($)
+          }
+        } else if (line.startsWith('error:')) $.ui.toast(`Listener: ${line.slice(6)}`)
       }
     }
     code = (await child.result).code
@@ -140,8 +171,14 @@ async function listen($: EngineInterface, bin: string): Promise<Heard> {
   }
   if (listening === run) listening = null
   await update($, isListening, () => false)
-  const said = out.trim()
-  return { text: run.isCancelled || !said ? null : said, isCancelled: run.isCancelled, isFatal: code !== null && code >= 3 }
+  const raw = out.trim()
+  const said = stripEcho(raw, echo)
+  return {
+    text: run.isCancelled || !said ? null : said,
+    isCancelled: run.isCancelled,
+    isFatal: code !== null && code >= 3,
+    isEcho: raw.length > 0 && !said,
+  }
 }
 
 async function setTalk($: EngineInterface, enabled: boolean) {
@@ -152,39 +189,72 @@ async function setTalk($: EngineInterface, enabled: boolean) {
   }
 }
 
-/** One hands-free round: listen until the human pauses, then send what they said as their prompt. */
-async function converse($: EngineInterface) {
+/** The ear: one listener at a time for as long as talk mode is on. What it hears becomes the next prompt. */
+async function runEar($: EngineInterface) {
   const p = await read($, active)
-  if (!p || !(await read($, isTalk))) return
+  if (!p) return
   const bin = await listenerPath($)
   if (!bin) return setTalk($, false)
-  for (let quiet = 0; quiet < 3 && (await read($, isTalk)); ) {
-    const r = await listen($, bin)
-    if (r.isCancelled) return
-    if (r.isFatal) return setTalk($, false)
-    if (r.text === null) {
-      quiet += 1
+  let quiet = 0
+  while (await read($, isTalk)) {
+    if (earPaused) {
+      await $.clock.sleep(200)
       continue
     }
-    if (END_TALK.test(r.text)) {
+    const r = await listen($, bin)
+    if (r.isCancelled) {
+      if (!(await read($, isTalk))) return
+      continue
+    }
+    if (r.isFatal) return setTalk($, false)
+    if (r.text === null) {
+      const busy = r.isEcho || runningTurn !== null || (await read($, isSpeaking))
+      if (!busy && ++quiet >= 3) {
+        // ponytail: three silent rounds end talk mode rather than listening forever
+        await setTalk($, false)
+        $.ui.toast(`${p.name} stopped listening after a long silence. /sidekick talk to resume.`)
+        return
+      }
+      continue
+    }
+    quiet = 0
+    const said = r.text
+    if (END_TALK.test(said)) {
       await setTalk($, false)
       if (!(await read($, isMuted))) void say($, 'Talk mode off.', p.voice)
       return
     }
-    void $.prompt.submit({ text: r.text, asUser: true })
-    return
+    await hush($)
+    if (STOP.test(said)) {
+      if (runningTurn) await $.turn.abort({ turnId: runningTurn }).catch(() => {})
+      continue
+    }
+    void $.prompt.submit({ text: said, asUser: true })
   }
-  // ponytail: three silent rounds end talk mode rather than listening forever
-  await setTalk($, false)
-  $.ui.toast(`${p.name} stopped listening after a long silence. /sidekick talk to resume.`)
 }
 
+/** Turns talk mode on: greets, and starts the ear once. */
 async function startTalk($: EngineInterface) {
   const p = await read($, active)
   if (!p) return
-  if (!(await listenerPath($))) return setTalk($, false)
-  if (!(await read($, isMuted))) await say($, `${p.name} here. I'm listening.`, p.voice)
-  await converse($)
+  if (!(await read($, isMuted))) void say($, `${p.name} here. I'm listening.`, p.voice)
+  if (earLoop) return
+  earLoop = runEar($)
+    .catch(() => {
+      // the session or the module went away mid-listen
+    })
+    .finally(() => {
+      earLoop = null
+    })
+}
+
+async function toggleTalk($: EngineInterface) {
+  if (await read($, isTalk)) {
+    await hush($)
+    return setTalk($, false)
+  }
+  await setTalk($, true)
+  void startTalk($)
 }
 
 const findPersona = (list: Persona[], q: string) =>
@@ -255,11 +325,10 @@ export const register: Register = (on, options) => {
       case 'talk': {
         const p = await read($, active)
         if (!p) return { text: 'Pick a sidekick first: /sidekick use Rudy' }
-        const turnOn = !(await read($, isTalk))
-        await setTalk($, turnOn)
-        if (!turnOn) return { text: '🎙 Talk mode off.' }
-        void startTalk($)
-        return { text: `🎙 Talk mode on. Just speak; ${p.name} answers out loud and listens again. Say "end talk" or press x on the band to stop.` }
+        const wasOn = await read($, isTalk)
+        await toggleTalk($)
+        if (wasOn) return { text: '🎙 Talk mode off.' }
+        return { text: `🎙 Talk mode on. Just speak; ${p.name} answers out loud and listens again. Talk over ${p.name} to interrupt. Say "end talk" or press x on the band to stop.` }
       }
       case 'mute':
       case 'speak': {
@@ -292,9 +361,9 @@ export const register: Register = (on, options) => {
     return { sections: [...composed.sections, { id: 'sidekick:persona', scope: 'session', text: contract(p, talk) }] }
   })
 
-  // a turn starting (typed, or ours) ends any listening in progress
+  // the ear keeps listening through a turn: what you say meanwhile is the next prompt, "stop" aborts the turn
   on('turn.start', async ($, e, next) => {
-    await stopListening($)
+    runningTurn = e.turnId
     return next(e)
   })
 
@@ -340,25 +409,34 @@ export const register: Register = (on, options) => {
     if (!p || !(await read($, isTalk))) return next(e)
     const bin = await listenerPath($)
     if (!bin) return next(e)
-    const answers: Record<string, string> = {}
-    for (const q of e.questions) {
-      const labels = q.options?.map(o => o.label) ?? []
-      await update($, question, () => ({ text: q.question, options: labels }))
-      let picked: string | undefined
-      for (let attempt = 0; attempt < 2 && !picked; attempt++) {
-        if (!(await read($, isMuted))) await say($, askAloud(q.question, labels, attempt > 0), p.voice)
-        const r = await listen($, bin)
-        if (r.isCancelled || r.isFatal) break
-        if (r.text) picked = labels.length > 0 ? pickOption(r.text, labels, q.multiSelect) : r.text
+    earPaused = true
+    await stopListening($)
+    try {
+      const answers: Record<string, string> = {}
+      for (const q of e.questions) {
+        const labels = q.options?.map(o => o.label) ?? []
+        await update($, question, () => ({ text: q.question, options: labels }))
+        let picked: string | undefined
+        for (let attempt = 0; attempt < 2 && !picked; attempt++) {
+          // listen while asking, so an answer spoken over the question still lands
+          const hearing = listen($, bin)
+          if (!(await read($, isMuted))) void say($, askAloud(q.question, labels, attempt > 0), p.voice)
+          const r = await hearing
+          await hush($)
+          if (r.isCancelled || r.isFatal) break
+          if (r.text) picked = labels.length > 0 ? pickOption(r.text, labels, q.multiSelect) : r.text
+        }
+        await update($, question, () => null)
+        if (!picked) {
+          $.ui.toast(`${p.name} didn't catch that. Pick with a key.`)
+          return next(e)
+        }
+        answers[q.question] = picked
       }
-      await update($, question, () => null)
-      if (!picked) {
-        $.ui.toast(`${p.name} didn't catch that. Pick with a key.`)
-        return next(e)
-      }
-      answers[q.question] = picked
+      return { result: { questions: e.questions, answers } }
+    } finally {
+      earPaused = false
     }
-    return { result: { questions: e.questions, answers } }
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
@@ -371,11 +449,11 @@ export const register: Register = (on, options) => {
     const muted = await read($, isMuted)
     const asked = await read($, question)
     const status = speaking
-      ? `🔊 ${p.name} is speaking…`
-      : hearing
-        ? `🎙 listening…`
-        : e.props.isWorking
-          ? `${p.glyph} ${p.name} is working…`
+      ? `🔊 ${p.name} is speaking… talk over to interrupt`
+      : e.props.isWorking
+        ? `${p.glyph} ${p.name} is working… say "stop" to cancel`
+        : hearing
+          ? `🎙 listening…`
           : `${p.glyph} ${p.name} is ready`
     return (
       <Box flexDirection="column">
@@ -389,10 +467,10 @@ export const register: Register = (on, options) => {
           {hearing && partial && <Text dimColor>{partial}</Text>}
           {speaking && <Button key="skip" label="skip" hotkey="s" plain onPress={() => hush($)} />}
           {!speaking && !hearing && !e.props.isWorking && (
-            <Button key="listen" label="listen" hotkey="l" plain onPress={() => void converse($)} />
+            <Button key="listen" label="listen" hotkey="l" plain onPress={() => void startTalk($)} />
           )}
           <Button key="mute" label={muted ? 'speak' : 'mute'} hotkey="m" plain onPress={() => toggleMute($)} />
-          <Button key="end" label="end talk" hotkey="x" plain onPress={() => setTalk($, false)} />
+          <Button key="end" label="end talk" hotkey="x" plain onPress={() => toggleTalk($)} />
         </Box>
       </Box>
     )
@@ -429,16 +507,7 @@ export const register: Register = (on, options) => {
         <Box flexDirection="row" columnGap={3}>
           <Button key="off" label="off" hotkey="0" plain onPress={() => setActive($, null)} />
           <Button key="mute" label={muted ? 'speak' : 'mute'} hotkey="m" plain onPress={() => toggleMute($)} />
-          <Button
-            key="talk"
-            label={talk ? 'end talk' : 'talk'}
-            hotkey="t"
-            plain
-            onPress={async () => {
-              await setTalk($, !talk)
-              if (!talk) void startTalk($)
-            }}
-          />
+          <Button key="talk" label={talk ? 'end talk' : 'talk'} hotkey="t" plain onPress={() => toggleTalk($)} />
         </Box>
         <Text> </Text>
         <Text dimColor>/sidekick new {'<describe someone>'} to add one</Text>
@@ -448,12 +517,10 @@ export const register: Register = (on, options) => {
 
   // the reply is spoken, then in talk mode the sidekick listens for what comes next
   on('turn.complete', async ($, e, next) => {
+    if (!e.agentId) runningTurn = null
     const p = await read($, active)
-    if (p && e.reason === 'answer' && !e.agentId) {
-      void (async () => {
-        if (!(await read($, isMuted))) await say($, spoken(e.answer, await read($, isTalk)), p.voice)
-        if (await read($, isTalk)) await converse($)
-      })()
+    if (p && e.reason === 'answer' && !e.agentId && !(await read($, isMuted))) {
+      void say($, spoken(e.answer, await read($, isTalk)), p.voice)
     }
     return next(e)
   })
