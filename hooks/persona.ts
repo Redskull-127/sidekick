@@ -111,7 +111,26 @@ export function spoken(markdown: string, isTalk: boolean): string {
     .trim()
   const sentences = plain.split(SENTENCES).filter(Boolean)
   // ponytail: people hate being read an essay; the screen has the rest
-  return sentences.slice(0, isTalk ? 2 : 1).join(' ').slice(0, isTalk ? 280 : 200)
+  return speakable(sentences.slice(0, isTalk ? 2 : 1).join(' ')).slice(0, isTalk ? 280 : 200)
+}
+
+/** Code read aloud is noise: paths, identifiers, symbols and slash commands are dropped or said plainly. */
+export function speakable(text: string): string {
+  const EXT = /\.(tsx?|jsx?|json|md|swift|py|css|html|ya?ml|toml|sh|wav|png)$/i
+  return text
+    .replace(/\/sidekick\b/g, 'slash sidekick')
+    .replace(/\b[\w.-]*\/[\w./-]+/g, (m) => (EXT.test(m) ? 'the file' : 'the path'))
+    .replace(/\b[\w-]+\.(tsx?|jsx?|json|md|swift|py|css|html|ya?ml|toml|sh|wav|png)\b/gi, 'the file')
+    .replace(/[`$<>{}[\]|\\^~]/g, ' ')
+    .replace(/\b\w+\(\)/g, (m) => m.slice(0, -2))
+    .replace(/\b\w+_\w+\b/g, (m) => m.replace(/_/g, ' '))
+    .replace(/\b(\w+)\.(?=\w)/g, '$1 ')
+    .replace(/\b([a-z]+)([A-Z][a-z]+)+\b/g, (m) => m.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase())
+    .replace(/\s*[:;]\s+/g, '. ')
+    .replace(/(^|\s)\.(?=\w)/g, '$1')
+    .replace(/\s+([.,!?])/g, '$1')
+    .replace(/\s+/g, ' ')
+    .trim()
 }
 
 const tokens = (s: string) => s.toLowerCase().replace(/[^a-z0-9'\s]/g, ' ').split(/\s+/).filter(Boolean)
@@ -159,7 +178,7 @@ export function contract(p: Persona, isTalk: boolean): string {
     p.prompt,
     `You are ${p.name}. Speak in first person as ${p.name} in every reply. You keep every ability of Claude Code: read, edit, run, search, delegate.`,
     `Rules:`,
-    `- Open every reply with one plain sentence that states the outcome or the plan. That sentence is read aloud to the human.`,
+    `- Open every reply with one plain sentence that states the outcome or the plan. That sentence is read aloud to the human, so write it as speech: no file names, no code, no symbols, no slash commands. Put those in the lines after it.`,
     `- Keep every reply short: the opening sentence, then at most five short lines. No essays. Expand only when the human asks for detail.`,
     `- When you need input or a decision from the human (a choice, a value, a confirmation), ask at once with the AskUserQuestion tool: one question, short concrete options. Never guess and never stall.`,
     `- When the human asks for a brief, what you did, or why: answer in 2 to 4 lines, then stop.`,

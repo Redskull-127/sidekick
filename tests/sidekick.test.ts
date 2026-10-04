@@ -4,7 +4,7 @@ import type { On } from 'claude-code'
 
 import type { Persona } from '../types'
 import { CHIME_OFF, CHIME_ON } from '../hooks/chime'
-import { bestVoice, foreignWords, parseGenerated, parseSayVoices, pickOption, spoken, stripEcho } from '../hooks/persona'
+import { bestVoice, foreignWords, parseGenerated, parseSayVoices, pickOption, speakable, spoken, stripEcho } from '../hooks/persona'
 
 const USAGE = { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
 
@@ -379,6 +379,10 @@ test('persona helpers: parse, spoken, echo, options', () => {
   expect(spoken('# Title\n\n- one `two` [three](http://x)\n\nmore', false)).toBe('Title')
   expect(spoken('First thing. Second thing. Third thing.', false)).toBe('First thing.')
   expect(spoken('Hi there. All good. And more.\n\n---\n\nnot spoken', true)).toBe('Hi there. All good.')
+  expect(speakable('Fixed hooks/register.tsx: the $.state.set call in setTalk() now runs before stopListening(). Run /sidekick talk again.')).toBe(
+    'Fixed the file. the state set call in set talk now runs before stop listening. Run slash sidekick talk again.',
+  )
+  expect(speakable('Renamed user_name to display_name in the API.')).toBe('Renamed user name to display name in the API.')
 
   const speech = 'The build passed, the tests are green, and nothing is pending right now.'
   expect(stripEcho('The past the tests are green and nothing is pending right now', speech)).toBe('')
