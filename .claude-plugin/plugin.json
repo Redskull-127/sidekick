@@ -1,0 +1,19 @@
+{
+  "name": "sidekick",
+  "version": "0.1.0",
+  "description": "Persona agents you can talk to: create a sidekick, it explains, does and fixes things in character, asks when it needs you, and speaks its replies.",
+  "author": { "name": "Meer Tarbani" },
+  "homepage": "https://github.com/meertarbani/voice-agent",
+  "repository": "https://github.com/meertarbani/voice-agent",
+  "license": "MIT",
+  "keywords": ["persona", "voice", "companion", "agent", "mod"],
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "speak": {
+      "type": "boolean",
+      "title": "Speak replies",
+      "description": "Read each reply aloud in the active sidekick's voice (macOS system speech). /sidekick mute toggles it per session.",
+      "default": true
+    }
+  }
+}

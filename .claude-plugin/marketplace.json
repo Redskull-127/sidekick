@@ -1,0 +1,8 @@
+{
+  "name": "meer-mods",
+  "owner": { "name": "Meer Tarbani" },
+  "description": "Mods by Meer Tarbani for Claude Code.",
+  "plugins": [
+    { "name": "sidekick", "source": "./", "description": "Persona agents you can talk to inside Claude Code." }
+  ]
+}
