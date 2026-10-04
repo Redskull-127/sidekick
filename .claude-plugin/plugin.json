@@ -1,13 +1,23 @@
 {
   "name": "sidekick",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Persona agents you can talk to: create a sidekick, it explains, does and fixes things in character, asks when it needs you, and speaks its replies.",
-  "author": { "name": "Meer Tarbani" },
-  "homepage": "https://github.com/Redskull-127/sidekick",
+  "author": {
+    "name": "Meer Tarbani"
+  },
+  "homepage": "https://sidekick.meertarbani.in",
   "repository": "https://github.com/Redskull-127/sidekick",
+  "documentationUrl": "https://sidekick.meertarbani.in/docs",
+  "supportUrl": "https://github.com/Redskull-127/sidekick/issues",
   "license": "MIT",
   "icon": "./.claude-plugin/icon.png",
-  "keywords": ["persona", "voice", "companion", "agent", "mod"],
+  "keywords": [
+    "persona",
+    "voice",
+    "companion",
+    "agent",
+    "mod"
+  ],
   "types": "./types/index.d.ts",
   "userConfig": {
     "speak": {
