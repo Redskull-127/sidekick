@@ -91,3 +91,58 @@ export function contract(p: Persona, isTalk: boolean): string {
   }
   return lines.join('\n')
 }
+
+const ORDINALS: Record<string, number> = {
+  one: 0, first: 0, '1': 0, two: 1, second: 1, '2': 1, three: 2, third: 2, '3': 2, four: 3, fourth: 3, '4': 3,
+  five: 4, fifth: 4, '5': 4, six: 5, sixth: 5, '6': 5, last: -1,
+}
+const STOP = new Set(['the', 'and', 'for', 'with', 'one', 'option', 'please', 'yes', 'yeah', 'lets', 'let', 'use', 'the', 'this', 'that'])
+const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim()
+const words = (s: string) => norm(s).split(' ').filter(w => w.length > 2 && !STOP.has(w))
+
+/** Picks the option(s) a spoken answer names; a long answer that names none is returned as free text. */
+export function pickOption(said: string, labels: string[], multiSelect: boolean): string | undefined {
+  const s = norm(said)
+  if (!s) return undefined
+  const hits = new Set<number>()
+  const ordinals = s.split(' ').filter(w => ORDINALS[w] !== undefined)
+  // "the second one": "one" is a pronoun here, not a number
+  const counted = !multiSelect && ordinals.length > 1 ? ordinals.filter(w => w !== 'one') : ordinals
+  for (const w of counted) {
+    const n = ORDINALS[w]!
+    if (labels.length > 0) hits.add(n === -1 ? labels.length - 1 : n)
+  }
+  let best = -1
+  let bestScore = 0
+  labels.forEach((label, i) => {
+    const l = norm(label)
+    if (!l) return
+    if (s.includes(l) || (s.length > 2 && l.includes(s))) {
+      hits.add(i)
+      return
+    }
+    const score = words(label).filter(w => s.includes(w)).length
+    if (score > bestScore) {
+      bestScore = score
+      best = i
+    }
+  })
+  if (/^(yes|yeah|yep|sure|okay|ok|go ahead|do it)\b/.test(s)) {
+    const i = labels.findIndex(l => /^(yes|run|proceed|ok|go|do it|recommended)/i.test(l) || /recommended/i.test(l))
+    if (i >= 0) hits.add(i)
+  }
+  if (/^(no|nope|nah|cancel|skip)\b/.test(s)) {
+    const i = labels.findIndex(l => /^(no|cancel|skip|refuse|stop)/i.test(l))
+    if (i >= 0) hits.add(i)
+  }
+  if (hits.size === 0 && best >= 0) hits.add(best)
+  const picked = [...hits].filter(i => i >= 0 && i < labels.length).sort((a, b) => a - b).map(i => labels[i]!)
+  if (picked.length > 0) return multiSelect ? picked.join(', ') : picked[0]
+  return s.split(' ').length >= 3 ? said.trim() : undefined
+}
+
+/** How a question is read aloud: the question, then its numbered options. */
+export function askAloud(question: string, labels: string[], again = false): string {
+  const opts = labels.map((l, i) => `${i + 1}: ${l}.`).join(' ')
+  return again ? `Sorry, which one? ${opts}` : `${question} ${opts}`.trim()
+}
