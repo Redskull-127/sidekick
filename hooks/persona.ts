@@ -1,7 +1,37 @@
 import type { Persona } from '../types'
 
-// ponytail: stock macOS English voices; a voice outside the list falls back to the default one at speak time
-export const VOICES = ['Samantha', 'Daniel', 'Karen', 'Moira', 'Rishi', 'Tessa', 'Fred', 'Ralph', 'Kathy', 'Albert'] as const
+/**
+ * Apple's natural English voices. Each exists as "<Name> (Premium)" or "<Name> (Enhanced)" once downloaded in
+ * System Settings; until then the compact voice in COMPACT stands in. Soft, clear ones first.
+ */
+export const VOICES = ['Ava', 'Zoe', 'Allison', 'Samantha', 'Susan', 'Evan', 'Tom', 'Nathan', 'Serena', 'Kate', 'Oliver', 'Daniel', 'Jamie', 'Karen', 'Lee', 'Rishi'] as const
+
+/** The compact voice that stands in while a natural one is not downloaded. */
+const COMPACT: Record<string, string> = {
+  Ava: 'Samantha', Zoe: 'Samantha', Allison: 'Samantha', Samantha: 'Samantha', Susan: 'Samantha',
+  Evan: 'Daniel', Tom: 'Daniel', Nathan: 'Daniel', Oliver: 'Daniel', Jamie: 'Daniel', Lee: 'Daniel', Daniel: 'Daniel',
+  Serena: 'Moira', Kate: 'Karen', Karen: 'Karen', Rishi: 'Rishi',
+}
+
+/** Names from `say -v ?`: "Ava (Premium)   en_US   # ..." → "Ava (Premium)". */
+export function parseSayVoices(stdout: string): string[] {
+  return stdout
+    .split('\n')
+    .map(line => line.match(/^(.+?)\s{2,}[a-z]{2}[_-][A-Za-z]{2,}/)?.[1]?.trim())
+    .filter((v): v is string => Boolean(v))
+}
+
+/** The best installed variant of a voice: Premium, then Enhanced, then any natural voice, then the compact stand-in. */
+export function bestVoice(base: string, installed: string[]): string {
+  const have = new Set(installed)
+  for (const variant of [`${base} (Premium)`, `${base} (Enhanced)`]) if (have.has(variant)) return variant
+  const anyNatural = installed.find(v => /\((Premium|Enhanced)\)$/.test(v) && /^[A-Z]/.test(v))
+  if (anyNatural && !have.has(base)) return anyNatural
+  if (have.has(base)) return base
+  return anyNatural ?? COMPACT[base] ?? 'Samantha'
+}
+
+export const hasNaturalVoice = (installed: string[]) => installed.some(v => /\((Premium|Enhanced)\)$/.test(v))
 export const COLORS = ['cyan', 'magenta', 'green', 'yellow', 'blue', 'red'] as const
 
 export const PRESETS: Persona[] = [
@@ -10,7 +40,7 @@ export const PRESETS: Persona[] = [
     name: 'Ada',
     glyph: '🧭',
     color: 'cyan',
-    voice: 'Samantha',
+    voice: 'Ava',
     tagline: "Let's find out what's actually going on.",
     prompt:
       'You are Ada, a calm, methodical staff engineer. You read before you write, name the root cause before the fix, and explain in plain sentences without jargon. You are warm but never vague: every answer ends with what happens next.',
@@ -20,7 +50,7 @@ export const PRESETS: Persona[] = [
     name: 'Rudy',
     glyph: '🦊',
     color: 'yellow',
-    voice: 'Daniel',
+    voice: 'Tom',
     tagline: 'Ship it or delete it.',
     prompt:
       'You are Rudy, a blunt senior developer who has been paged at 3am for every over-engineered system. You prefer deleting code to adding it, say what you think in short sentences, and are dryly funny but never cruel. When something is wrong you say so, then fix it.',
@@ -48,7 +78,7 @@ export function parseGenerated(text: string): Persona | undefined {
   if (!name || prompt.length < 20) return undefined
   const glyph = [...str('glyph')][0] ?? '✨'
   const color = (COLORS as readonly string[]).includes(str('color')) ? str('color') : 'cyan'
-  const voice = (VOICES as readonly string[]).includes(str('voice')) ? str('voice') : 'Samantha'
+  const voice = (VOICES as readonly string[]).includes(str('voice')) ? str('voice') : 'Ava'
   return { id: slug(name), name, glyph, color, voice, tagline: str('tagline').slice(0, 100) || `${name} is here.`, prompt }
 }
 

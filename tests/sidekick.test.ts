@@ -3,7 +3,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import type { Persona } from '../types'
-import { foreignWords, parseGenerated, pickOption, spoken, stripEcho } from '../hooks/persona'
+import { bestVoice, foreignWords, parseGenerated, parseSayVoices, pickOption, spoken, stripEcho } from '../hooks/persona'
 
 const USAGE = { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
 
@@ -29,9 +29,10 @@ const BAND = {
  * Speech stays "in progress" until the test ends it or the mod hushes it. The microphone
  * waits for the test to `hear` something; `pkill` from the mod ends a pending listen.
  */
-function boot(on: On, seed: Record<string, unknown> = {}) {
+function boot(on: On, seed: Record<string, unknown> = {}, sayVoices = 'Samantha             en_US    # Hello\nDaniel               en_GB    # Hello') {
   const saved = new Map<string, unknown>(Object.entries(seed))
   const spokenTexts: string[] = []
+  const spokenVoices: string[] = []
   const runs: string[] = []
   const submitted: { text: string; asUser?: true }[] = []
   const aborted: string[] = []
@@ -70,6 +71,7 @@ function boot(on: On, seed: Record<string, unknown> = {}) {
   let endSpeech: (() => void) | null = null
   on('audio.speak', ($, e) => {
     spokenTexts.push(e.text)
+    spokenVoices.push(e.voice ?? '')
     return new Promise<{ value: { via: 'system' } }>(resolve => {
       endSpeech = () => {
         endSpeech = null
@@ -98,7 +100,7 @@ function boot(on: On, seed: Record<string, unknown> = {}) {
     runs.push(cmd)
     if (cmd === 'killall say') finishSpeech()
     if (e.argv[0] === 'pkill') feed(CANCEL)
-    return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    return { value: { exitCode: 0, stdout: cmd === 'say -v ?' ? sayVoices : '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('process.spawn', async function* () {
     spawns += 1
@@ -112,7 +114,7 @@ function boot(on: On, seed: Record<string, unknown> = {}) {
     return { value: { code: 0, signal: null } }
   })
 
-  return { saved, spokenTexts, plays, runs, submitted, aborted, clock, hear: (s: string) => feed(s), finishSpeech, spawnCount: () => spawns }
+  return { saved, spokenTexts, spokenVoices, plays, runs, submitted, aborted, clock, hear: (s: string) => feed(s), finishSpeech, spawnCount: () => spawns }
 }
 
 /** Runs /sidekick <args> as the person would. */
@@ -141,13 +143,15 @@ test('/sidekick new creates a persona, activates it and chimes', async ($, on) =
 })
 
 test('a finished turn is spoken short, in the persona voice, unless muted', async ($, on) => {
-  const { spokenTexts, finishSpeech } = boot(on, { active: 'rudy' })
+  const { spokenTexts, spokenVoices, finishSpeech } = boot(on, { active: 'rudy' })
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
 
   const essay = 'Fixed the **build**. Then I rewrote three files. Then I ran the tests.\n\nMore paragraphs here.\n\n```sh\nmake\n```'
   await $.turn.complete({ turnId: 't1', answer: essay, durationMs: 10, isAborted: false, reason: 'answer' })
   await settle(() => spokenTexts.length > 0)
   expect(spokenTexts).toEqual(['Fixed the build.'])
+  // Rudy wants Tom; with no natural voice downloaded the compact stand-in speaks
+  expect(spokenVoices).toEqual(['Daniel'])
   finishSpeech()
   await settle(() => false)
 
@@ -299,6 +303,19 @@ test('in talk mode a question is asked and answered by voice', async ($, on) => 
   await settle(() => false)
 })
 
+test('a downloaded natural voice is used as soon as it is installed', async ($, on) => {
+  const { spokenVoices, finishSpeech } = boot(on, { active: 'ada' }, 'Ava (Premium)        en_US    # Hello\nSamantha             en_US    # Hello\nTom (Enhanced)       en_US    # Hello')
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await $.turn.complete({ turnId: 't1', answer: 'Done.', durationMs: 10, isAborted: false, reason: 'answer' })
+  await settle(() => spokenVoices.length > 0)
+  expect(spokenVoices).toEqual(['Ava (Premium)'])
+  finishSpeech()
+  await settle(() => false)
+  const listing = await run($, 'voices')
+  expect(listing.text).toContain('Ava (Premium), Tom (Enhanced)')
+  expect(listing.text).toContain('Ada speaks as Ava (Premium)')
+})
+
 test('the active persona adds its section to the system prompt', async ($, on) => {
   boot(on, { active: 'rudy' })
   on('prompt.compose', () => ({ sections: [{ id: 'intro', text: 'You are Claude Code.', scope: 'shared' }] }))
@@ -313,7 +330,7 @@ test('the active persona adds its section to the system prompt', async ($, on) =
 
 test('persona helpers: parse, spoken, echo, options', () => {
   expect(parseGenerated('nonsense')).toBeUndefined()
-  expect(parseGenerated(JSON.stringify({ ...NOVA, color: 'plaid', voice: 'HAL' }))).toMatchObject({ id: 'nova', color: 'cyan', voice: 'Samantha' })
+  expect(parseGenerated(JSON.stringify({ ...NOVA, color: 'plaid', voice: 'HAL' }))).toMatchObject({ id: 'nova', color: 'cyan', voice: 'Ava' })
 
   expect(spoken('# Title\n\n- one `two` [three](http://x)\n\nmore', false)).toBe('Title')
   expect(spoken('First thing. Second thing. Third thing.', false)).toBe('First thing.')
@@ -328,6 +345,14 @@ test('persona helpers: parse, spoken, echo, options', () => {
   expect(stripEcho('tests pass yes please', 'Done, the tests pass.')).toBe('yes please')
   expect(foreignWords('done the', 'Done, the tests pass.')).toBe(0)
   expect(foreignWords('done the hey rudy', 'Done, the tests pass.')).toBe(2)
+
+  const installed = parseSayVoices('Ava (Premium)        en_US    # Hello\nSamantha             en_US    # Hello\nKaren                en_AU    # Hi')
+  expect(installed).toEqual(['Ava (Premium)', 'Samantha', 'Karen'])
+  expect(bestVoice('Ava', installed)).toBe('Ava (Premium)')
+  expect(bestVoice('Tom', installed)).toBe('Ava (Premium)')
+  expect(bestVoice('Karen', installed)).toBe('Karen')
+  expect(bestVoice('Tom', ['Samantha', 'Daniel'])).toBe('Daniel')
+  expect(bestVoice('Zoe', [])).toBe('Samantha')
 
   const labels = ['Run it', 'Refuse', 'Ask me later']
   expect(pickOption('the second one', labels, false)).toBe('Refuse')

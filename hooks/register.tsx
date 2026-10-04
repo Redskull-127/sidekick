@@ -3,7 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { Persona, SidekickQuestion } from '../types'
 import { LISTENER_PLIST, LISTENER_SWIFT, LISTENER_VERSION } from './listener-src'
-import { GEN_SYSTEM, PRESETS, askAloud, contract, foreignWords, parseGenerated, pickOption, spoken, stripEcho } from './persona'
+import { GEN_SYSTEM, PRESETS, VOICES, askAloud, bestVoice, contract, foreignWords, hasNaturalVoice, parseGenerated, parseSayVoices, pickOption, spoken, stripEcho } from './persona'
 
 const PANE = 'sidekick'
 const roster = atom({ plugin: 'sidekick', key: 'roster' } as const, [] as Persona[])
@@ -21,16 +21,36 @@ const USAGE = [
   '/sidekick use <name> | off',
   '/sidekick talk            hands-free: speak, it answers, it listens again',
   '/sidekick mute | speak',
+  '/sidekick voices [install]  natural Apple voices',
   '/sidekick list | rm <name>',
+].join('\n')
+
+const VOICE_SETTINGS = 'x-apple.systempreferences:com.apple.preference.universalaccess?SpokenContent'
+const VOICE_STEPS = [
+  'System Settings → Accessibility → Spoken Content → System Voice → ⓘ Manage Voices → English.',
+  'Download Ava (Premium) and Tom (Enhanced), or any voice marked Premium or Enhanced. Sidekicks pick them up at once.',
 ].join('\n')
 
 const END_TALK = /\b(end talk|stop talking|stop listening|that'?s all|goodbye)\b/i
 const STOP = /^(stop|wait|hold on|hang on|never ?mind|shut up|quiet)\b/i
 
+let installedVoices: string[] = []
+
+/** Which voices `say` has right now; a natural one that was downloaded since is found on the next session. */
+async function loadVoices($: EngineInterface) {
+  try {
+    const r = await $.process.run(['say', '-v', '?'])
+    installedVoices = parseSayVoices(r.stdout)
+  } catch {
+    installedVoices = []
+  }
+}
+
 /** Store → state, at session start and after /clear, /resume, /branch. */
 async function load($: EngineInterface, speakByDefault: boolean) {
   const saved = (await $.store.get('personas')) as Persona[] | undefined
-  const list = saved && saved.length > 0 ? saved : PRESETS
+  // our presets keep our voice choices; personas the person made keep theirs
+  const list = (saved && saved.length > 0 ? saved : PRESETS).map(p => ({ ...p, voice: PRESETS.find(x => x.id === p.id)?.voice ?? p.voice }))
   if (!saved) await $.store.set('personas', list)
   const activeId = (await $.store.get('active')) as string | null | undefined
   const muted = (await $.store.get('isMuted')) as boolean | undefined
@@ -66,7 +86,7 @@ async function say($: EngineInterface, text: string, voice: string) {
   speechNow = text
   await update($, isSpeaking, () => true)
   try {
-    await $.audio.speak(text, { voice })
+    await $.audio.speak(text, { voice: bestVoice(voice, installedVoices) })
   } catch {
     if (!isHushed) {
       try {
@@ -271,6 +291,7 @@ export const register: Register = (on, options) => {
   const speakByDefault = options.speak !== false
 
   on('session.start', async ($, e, next) => {
+    await loadVoices($)
     await load($, speakByDefault)
     if (await read($, active)) void $.ui.open({ id: PANE, title: 'Sidekick' })
     try {
@@ -335,7 +356,24 @@ export const register: Register = (on, options) => {
         const wasOn = await read($, isTalk)
         await toggleTalk($)
         if (wasOn) return { text: '🎙 Talk mode off.' }
+        if (!hasNaturalVoice(installedVoices)) $.ui.toast('Voice sounds robotic? /sidekick voices install gets Apple\'s natural ones.')
         return { text: `🎙 Talk mode on. Just speak; ${p.name} answers out loud and listens again. Talk over ${p.name} to interrupt. Say "end talk" or press x on the band to stop.` }
+      }
+      case 'voices': {
+        if (arg === 'install') {
+          await $.process.run(['open', VOICE_SETTINGS]).catch(() => {})
+          return { text: `Opened System Settings.\n${VOICE_STEPS}` }
+        }
+        await loadVoices($)
+        const natural = installedVoices.filter(v => /\((Premium|Enhanced)\)$/.test(v))
+        const cur = await read($, active)
+        const lines = [
+          natural.length > 0 ? `Natural voices installed: ${natural.join(', ')}` : 'No natural (Premium/Enhanced) voices installed yet, so sidekicks use the compact ones.',
+          cur ? `${cur.glyph} ${cur.name} speaks as ${bestVoice(cur.voice, installedVoices)}.` : '',
+          `Sidekicks choose from: ${VOICES.join(', ')}.`,
+          natural.length > 0 ? '' : `/sidekick voices install opens the download pane.\n${VOICE_STEPS}`,
+        ]
+        return { text: lines.filter(Boolean).join('\n') }
       }
       case 'mute':
       case 'speak': {
