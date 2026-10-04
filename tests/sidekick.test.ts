@@ -61,7 +61,8 @@ function boot(on: On, seed: Record<string, unknown> = {}, sayVoices = 'Samantha 
     aborted.push(e.turnId)
     return { value: undefined }
   })
-  on('fs.read', () => ({ value: 'swift source' }))
+  on('fs.read', () => ({ deny: 'no such file' }))
+  on('fs.write', () => ({ value: undefined }))
   on('fs.exists', () => ({ value: true }))
   on('prompt.submit', ($, e) => {
     submitted.push({ text: e.text, asUser: (e.origin as { asUser?: true }).asUser })

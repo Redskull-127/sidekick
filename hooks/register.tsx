@@ -1,19 +1,20 @@
-import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Persona, SidekickQuestion } from '../types'
 import { CHIME_OFF, CHIME_ON } from './chime'
+import { LISTENER_PLIST, LISTENER_SWIFT } from './listener-source'
 import { GEN_SYSTEM, PRESETS, VOICES, askAloud, bestVoice, contract, foreignWords, hasNaturalVoice, parseGenerated, parseSayVoices, pickOption, spoken, stripEcho } from './persona'
 
 const PANE = 'sidekick'
-const roster = atom({ plugin: 'sidekick', key: 'roster' } as const, [] as Persona[])
-const active = atom({ plugin: 'sidekick', key: 'active' } as const, null as Persona | null)
-const isMuted = atom({ plugin: 'sidekick', key: 'isMuted' } as const, false)
-const isTalk = atom({ plugin: 'sidekick', key: 'isTalk' } as const, false)
-const isSpeaking = atom({ plugin: 'sidekick', key: 'isSpeaking' } as const, false)
-const isListening = atom({ plugin: 'sidekick', key: 'isListening' } as const, false)
-const heard = atom({ plugin: 'sidekick', key: 'heard' } as const, '')
-const question = atom({ plugin: 'sidekick', key: 'question' } as const, null as SidekickQuestion | null)
+// session state the drawings read; each a literal reference for `$.state`
+const roster = { plugin: 'sidekick', key: 'roster' } as const
+const active = { plugin: 'sidekick', key: 'active' } as const
+const isMuted = { plugin: 'sidekick', key: 'isMuted' } as const
+const isTalk = { plugin: 'sidekick', key: 'isTalk' } as const
+const isSpeaking = { plugin: 'sidekick', key: 'isSpeaking' } as const
+const isListening = { plugin: 'sidekick', key: 'isListening' } as const
+const heard = { plugin: 'sidekick', key: 'heard' } as const
+const question = { plugin: 'sidekick', key: 'question' } as const
 
 const USAGE = [
   '/sidekick                 roster pane',
@@ -54,21 +55,21 @@ async function load($: EngineInterface, speakByDefault: boolean) {
   if (!saved) await $.store.set('personas', list)
   const activeId = (await $.store.get('active')) as string | null | undefined
   const muted = (await $.store.get('isMuted')) as boolean | undefined
-  await update($, roster, () => list)
-  await update($, active, () => list.find(p => p.id === activeId) ?? null)
-  await update($, isMuted, () => muted ?? !speakByDefault)
+  await $.state.set(roster, list)
+  await $.state.set(active, list.find(p => p.id === activeId) ?? null)
+  await $.state.set(isMuted, muted ?? !speakByDefault)
   // talk mode is per session: a new session starts quiet
-  await update($, isTalk, () => false)
+  await $.state.set(isTalk, false)
 }
 
 async function setActive($: EngineInterface, p: Persona | null) {
-  await update($, active, () => p)
+  await $.state.set(active, p)
   await $.store.set('active', p?.id ?? null)
 }
 
 async function toggleMute($: EngineInterface) {
-  const muted = !(await read($, isMuted))
-  await update($, isMuted, () => muted)
+  const muted = !(((await $.state.get(isMuted)).value ?? false))
+  await $.state.set(isMuted, muted)
   await $.store.set('isMuted', muted)
   return muted
 }
@@ -85,12 +86,12 @@ const echoText = () => recentSpeech.join(' ')
 /** Speaks in the persona's voice, cutting any speech still going; falls back to the default voice, then to silence. */
 async function say($: EngineInterface, text: string, voice: string) {
   if (!text) return
-  if (await read($, isSpeaking)) await hush($)
+  if (((await $.state.get(isSpeaking)).value ?? false)) await hush($)
   const mine = ++sayId
   isHushed = false
   speechNow = text
   recentSpeech = [...recentSpeech.slice(-2), text]
-  await update($, isSpeaking, () => true)
+  await $.state.set(isSpeaking, true)
   try {
     await $.audio.speak(text, { voice: bestVoice(voice, installedVoices) })
   } catch {
@@ -104,18 +105,28 @@ async function say($: EngineInterface, text: string, voice: string) {
   }
   if (sayId !== mine) return
   speechNow = ''
-  await update($, isSpeaking, () => false)
-  if (!isHushed && (await read($, isTalk))) void chime($)
+  await $.state.set(isSpeaking, false)
+  if (!isHushed && (((await $.state.get(isTalk)).value ?? false))) void chime($)
+}
+
+/** Awaits a call whose failure does not matter (a chime that cannot play, a program not running). */
+async function quietly(work: Promise<unknown>) {
+  try {
+    await work
+  } catch {
+    // nothing to do
+  }
 }
 
 /** The cabin chime: "a sidekick is on" and "your turn"; the lower one when talk mode ends. */
-const chime = ($: EngineInterface, kind: 'on' | 'off' = 'on') =>
-  $.audio.play({ base64: kind === 'off' ? CHIME_OFF : CHIME_ON, mime: 'audio/wav' }).catch(() => {})
+async function chime($: EngineInterface, kind: 'on' | 'off' = 'on') {
+  await quietly($.audio.play({ base64: kind === 'off' ? CHIME_OFF : CHIME_ON, mime: 'audio/wav' }))
+}
 
 // ponytail: `say` has no abort; killing the macOS synthesizer is the one-line skip
 async function hush($: EngineInterface) {
   isHushed = true
-  await $.process.run(['killall', 'say']).catch(() => {})
+  await quietly($.process.run(['killall', 'say']))
 }
 
 // ── the listener: macOS speech recognition in a small native binary, built once ─────────────────
@@ -127,33 +138,39 @@ function sourceVersion(source: string): string {
   return h.toString(16)
 }
 
-// where the compiled listener lives: a fixed folder, one binary per source version
+// where the listener is built and run: fixed paths, outside any project
 const LISTENER_DIR = '/var/tmp/sidekick'
+const LISTENER_SOURCE = '/var/tmp/sidekick/listen.swift'
+const LISTENER_PLIST_PATH = '/var/tmp/sidekick/Info.plist'
+const LISTENER_BIN = '/var/tmp/sidekick/listen'
+const LISTENER_VERSION_FILE = '/var/tmp/sidekick/listen.version'
 
-/** Where the compiled listener lives, building it on first use from listener/listen.swift; null when it cannot be built here. */
+/** Where the compiled listener lives, building it on first use from the source in listener-source.ts; null when it cannot be built here. */
 async function listenerPath($: EngineInterface): Promise<string | null> {
-  const source = `${$.plugin.root}/listener/listen.swift`
-  const plist = `${$.plugin.root}/listener/Info.plist`
-  let bin: string
+  const version = sourceVersion(LISTENER_SWIFT)
+  let built = ''
   try {
-    bin = `${LISTENER_DIR}/listen-${sourceVersion(await $.fs.read(source))}`
+    built = await $.fs.read(LISTENER_VERSION_FILE)
   } catch {
-    return null
+    built = ''
   }
-  if (await $.fs.exists(bin)) return bin
+  if (built.trim() === version && (await $.fs.exists(LISTENER_BIN))) return LISTENER_BIN
   $.ui.toast('Building the sidekick listener, one time, about 20 seconds…')
   try {
     await $.process.run(['mkdir', '-p', LISTENER_DIR])
-    const built = await $.process.run(
-      ['swiftc', '-O', source, '-o', bin, '-Xlinker', '-sectcreate', '-Xlinker', '__TEXT', '-Xlinker', '__info_plist', '-Xlinker', plist],
+    await $.fs.write(LISTENER_SOURCE, LISTENER_SWIFT)
+    await $.fs.write(LISTENER_PLIST_PATH, LISTENER_PLIST)
+    const compiled = await $.process.run(
+      ['swiftc', '-O', '/var/tmp/sidekick/listen.swift', '-o', '/var/tmp/sidekick/listen', '-Xlinker', '-sectcreate', '-Xlinker', '__TEXT', '-Xlinker', '__info_plist', '-Xlinker', '/var/tmp/sidekick/Info.plist'],
       { timeoutMs: 240_000 },
     )
-    if (built.exitCode !== 0) {
-      const why = built.stderr.split('\n').find(l => l.includes('error:')) ?? built.stderr.slice(0, 200)
+    if (compiled.exitCode !== 0) {
+      const why = compiled.stderr.split('\n').find(l => l.includes('error:')) ?? compiled.stderr.slice(0, 200)
       $.ui.toast(`Listener build failed: ${why}`)
       return null
     }
-    return bin
+    await $.fs.write(LISTENER_VERSION_FILE, version)
+    return LISTENER_BIN
   } catch {
     $.ui.toast('Hands-free needs macOS with the Xcode Command Line Tools (xcode-select --install).')
     return null
@@ -173,7 +190,7 @@ async function stopListening($: EngineInterface) {
   if (!current) return
   current.isCancelled = true
   // ponytail: a pending stream read cannot be interrupted from here, so the child is ended by name
-  await $.process.run(['pkill', '-f', current.bin]).catch(() => {})
+  await quietly($.process.run(['pkill', '-f', '/var/tmp/sidekick/listen']))
 }
 
 /**
@@ -184,13 +201,13 @@ async function listen($: EngineInterface, bin: string): Promise<Heard> {
   if (listening) await stopListening($)
   const run = { bin, isCancelled: false }
   listening = run
-  await update($, heard, () => '')
-  await update($, isListening, () => true)
+  await $.state.set(heard, '')
+  await $.state.set(isListening, true)
   let out = ''
   let code: number | null = null
   let bargedIn = false
   try {
-    const child = $.process.spawn({ argv: [bin, '--silence', '1.4', '--max', '60'] })
+    const child = $.process.spawn({ argv: ['/var/tmp/sidekick/listen', '--silence', '1.4', '--max', '60'] })
     for await (const { stream, text } of child) {
       if (stream === 'stdout') {
         out += text
@@ -199,7 +216,7 @@ async function listen($: EngineInterface, bin: string): Promise<Heard> {
       for (const line of text.split('\n')) {
         if (line.startsWith('partial:')) {
           const own = stripEcho(line.slice(8), echoText())
-          await update($, heard, () => own)
+          await $.state.set(heard, own)
           // two words that are not in its own speech mean the human is talking over it
           if (speechNow && !bargedIn && foreignWords(line.slice(8), echoText()) >= 2) {
             bargedIn = true
@@ -213,7 +230,7 @@ async function listen($: EngineInterface, bin: string): Promise<Heard> {
     code = 5
   }
   if (listening === run) listening = null
-  await update($, isListening, () => false)
+  await $.state.set(isListening, false)
   const raw = out.trim()
   const said = stripEcho(raw, echoText())
   return {
@@ -225,35 +242,35 @@ async function listen($: EngineInterface, bin: string): Promise<Heard> {
 }
 
 async function setTalk($: EngineInterface, enabled: boolean) {
-  const was = await read($, isTalk)
-  await update($, isTalk, () => enabled)
+  const was = ((await $.state.get(isTalk)).value ?? false)
+  await $.state.set(isTalk, enabled)
   if (!enabled) {
     await stopListening($)
-    await update($, question, () => null)
+    await $.state.set(question, null)
     if (was) void chime($, 'off')
   }
 }
 
 /** The ear: one listener at a time for as long as talk mode is on. What it hears becomes the next prompt. */
 async function runEar($: EngineInterface) {
-  const p = await read($, active)
+  const p = ((await $.state.get(active)).value ?? null)
   if (!p) return
   const bin = await listenerPath($)
   if (!bin) return setTalk($, false)
   let quiet = 0
-  while (await read($, isTalk)) {
+  while (((await $.state.get(isTalk)).value ?? false)) {
     if (earPaused) {
       await $.clock.sleep(200)
       continue
     }
     const r = await listen($, bin)
     if (r.isCancelled) {
-      if (!(await read($, isTalk))) return
+      if (!(((await $.state.get(isTalk)).value ?? false))) return
       continue
     }
     if (r.isFatal) return setTalk($, false)
     if (r.text === null) {
-      const busy = r.isEcho || runningTurn !== null || (await read($, isSpeaking))
+      const busy = r.isEcho || runningTurn !== null || (((await $.state.get(isSpeaking)).value ?? false))
       if (!busy && ++quiet >= 3) {
         // ponytail: three silent rounds end talk mode rather than listening forever
         await setTalk($, false)
@@ -264,13 +281,13 @@ async function runEar($: EngineInterface) {
     }
     quiet = 0
     const said = r.text
-    if (await read($, isSpeaking)) await hush($)
+    if (((await $.state.get(isSpeaking)).value ?? false)) await hush($)
     if (END_TALK.test(said)) {
       await setTalk($, false)
       return
     }
     if (STOP.test(said)) {
-      if (runningTurn) await $.turn.abort({ turnId: runningTurn }).catch(() => {})
+      if (runningTurn) await quietly($.turn.abort({ turnId: runningTurn }))
       continue
     }
     void $.prompt.submit({ text: said, asUser: true })
@@ -279,21 +296,17 @@ async function runEar($: EngineInterface) {
 
 /** Turns talk mode on: greets, and starts the ear once. */
 async function startTalk($: EngineInterface) {
-  const p = await read($, active)
+  const p = ((await $.state.get(active)).value ?? null)
   if (!p) return
   void chime($)
   if (earLoop) return
-  earLoop = runEar($)
-    .catch(() => {
-      // the session or the module went away mid-listen
-    })
-    .finally(() => {
-      earLoop = null
-    })
+  earLoop = quietly(runEar($)).finally(() => {
+    earLoop = null
+  })
 }
 
 async function toggleTalk($: EngineInterface) {
-  if (await read($, isTalk)) {
+  if (((await $.state.get(isTalk)).value ?? false)) {
     await hush($)
     return setTalk($, false)
   }
@@ -310,7 +323,7 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     await loadVoices($)
     await load($, speakByDefault)
-    if (await read($, active)) void $.ui.open({ id: PANE, title: 'Sidekick' })
+    if (((await $.state.get(active)).value ?? null)) void $.ui.open({ id: PANE, title: 'Sidekick' })
     try {
       await $.command.register({
         name: 'sidekick',
@@ -332,7 +345,7 @@ export const register: Register = (on, options) => {
   on('command.run', { command: 'sidekick' }, async ($, e) => {
     const [sub = '', ...rest] = e.args.trim().split(/\s+/)
     const arg = rest.join(' ')
-    const list = await read($, roster)
+    const list: Persona[] = (await $.state.get(roster)).value ?? []
 
     switch (sub) {
       case '': {
@@ -347,7 +360,7 @@ export const register: Register = (on, options) => {
         if (!p) return { text: 'The model did not return a persona I could read. Try a clearer description.' }
         if (list.some(x => x.id === p.id)) p.id = `${p.id}-${list.length + 1}`
         const grown = [...list, p]
-        await update($, roster, () => grown)
+        await $.state.set(roster, grown)
         await $.store.set('personas', grown)
         await setActive($, p)
         void $.ui.open({ id: PANE, title: 'Sidekick' })
@@ -368,9 +381,9 @@ export const register: Register = (on, options) => {
         return { text: 'Sidekick off. Plain Claude is back.' }
       }
       case 'talk': {
-        const p = await read($, active)
+        const p = ((await $.state.get(active)).value ?? null)
         if (!p) return { text: 'Pick a sidekick first: /sidekick use Rudy' }
-        const wasOn = await read($, isTalk)
+        const wasOn = ((await $.state.get(isTalk)).value ?? false)
         await toggleTalk($)
         if (wasOn) return { text: '🎙 Talk mode off.' }
         if (!hasNaturalVoice(installedVoices)) $.ui.toast('Voice sounds robotic? /sidekick voices install gets Apple\'s natural ones.')
@@ -378,12 +391,12 @@ export const register: Register = (on, options) => {
       }
       case 'voices': {
         if (arg === 'install') {
-          await $.process.run(['open', VOICE_SETTINGS]).catch(() => {})
+          await quietly($.process.run(['open', VOICE_SETTINGS]))
           return { text: `Opened System Settings.\n${VOICE_STEPS}` }
         }
         await loadVoices($)
         const natural = installedVoices.filter(v => /\((Premium|Enhanced)\)$/.test(v))
-        const cur = await read($, active)
+        const cur = ((await $.state.get(active)).value ?? null)
         const lines = [
           natural.length > 0 ? `Natural voices installed: ${natural.join(', ')}` : 'No natural (Premium/Enhanced) voices installed yet, so sidekicks use the compact ones.',
           cur ? `${cur.glyph} ${cur.name} speaks as ${bestVoice(cur.voice, installedVoices)}.` : '',
@@ -398,16 +411,16 @@ export const register: Register = (on, options) => {
         return { text: muted ? '🔇 Replies are no longer spoken.' : '🔊 Replies are spoken again.' }
       }
       case 'list': {
-        const cur = await read($, active)
+        const cur = ((await $.state.get(active)).value ?? null)
         return { text: list.map(p => `${p.id === cur?.id ? '●' : ' '} ${p.glyph} ${p.name} — ${p.tagline}`).join('\n') }
       }
       case 'rm': {
         const p = findPersona(list, arg)
         if (!p) return { text: `No sidekick named "${arg}".` }
         const grown = list.filter(x => x.id !== p.id)
-        await update($, roster, () => grown)
+        await $.state.set(roster, grown)
         await $.store.set('personas', grown)
-        if ((await read($, active))?.id === p.id) await setActive($, null)
+        if ((((await $.state.get(active)).value ?? null))?.id === p.id) await setActive($, null)
         return { text: `Removed ${p.glyph} ${p.name}.` }
       }
       default:
@@ -417,9 +430,9 @@ export const register: Register = (on, options) => {
 
   on('prompt.compose', async ($, e, next) => {
     const composed = await next(e)
-    const p = await read($, active)
+    const p = ((await $.state.get(active)).value ?? null)
     if (!p) return composed
-    const talk = await read($, isTalk)
+    const talk = ((await $.state.get(isTalk)).value ?? false)
     return { sections: [...composed.sections, { id: 'sidekick:persona', scope: 'session', text: contract(p, talk) }] }
   })
 
@@ -430,7 +443,7 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => {
-    const p = await read($, active)
+    const p = ((await $.state.get(active)).value ?? null)
     if (!p || !e.props.isFirstOfReply) return next(e)
     const { Box, Text } = $.ui.resolve(e)
     const theirs = await next(e)
@@ -445,13 +458,13 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'Spinner' }, async ($, e, next) => {
-    const p = await read($, active)
+    const p = ((await $.state.get(active)).value ?? null)
     if (!p) return next(e)
     return next({ ...e, props: { ...e.props, suffix: ` · ${p.name} is on it…` } })
   })
 
   on('ui.render', { component: 'AskUserQuestion' }, async ($, e, next) => {
-    const p = await read($, active)
+    const p = ((await $.state.get(active)).value ?? null)
     if (!p) return next(e)
     const { Box, Text } = $.ui.resolve(e)
     const theirs = await next(e)
@@ -467,8 +480,8 @@ export const register: Register = (on, options) => {
 
   // in talk mode a question is asked and answered by voice; the dialog is the fallback
   on('tool.call', { tool: 'AskUserQuestion' }, async ($, e, next) => {
-    const p = await read($, active)
-    if (!p || !(await read($, isTalk))) return next(e)
+    const p = ((await $.state.get(active)).value ?? null)
+    if (!p || !(((await $.state.get(isTalk)).value ?? false))) return next(e)
     const bin = await listenerPath($)
     if (!bin) return next(e)
     earPaused = true
@@ -477,18 +490,18 @@ export const register: Register = (on, options) => {
       const answers: Record<string, string> = {}
       for (const q of e.questions) {
         const labels = q.options?.map(o => o.label) ?? []
-        await update($, question, () => ({ text: q.question, options: labels }))
+        await $.state.set(question, ({ text: q.question, options: labels }))
         let picked: string | undefined
         for (let attempt = 0; attempt < 2 && !picked; attempt++) {
           // listen while asking, so an answer spoken over the question still lands
           const hearing = listen($, bin)
-          if (!(await read($, isMuted))) void say($, askAloud(q.question, labels, attempt > 0), p.voice)
+          if (!(((await $.state.get(isMuted)).value ?? false))) void say($, askAloud(q.question, labels, attempt > 0), p.voice)
           const r = await hearing
           await hush($)
           if (r.isCancelled || r.isFatal) break
           if (r.text) picked = labels.length > 0 ? pickOption(r.text, labels, q.multiSelect) : r.text
         }
-        await update($, question, () => null)
+        await $.state.set(question, null)
         if (!picked) {
           $.ui.toast(`${p.name} didn't catch that. Pick with a key.`)
           return next(e)
@@ -502,14 +515,14 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    const p = await read($, active)
-    if (!p || e.props.hasSurvey || !(await read($, isTalk))) return next(e)
+    const p = ((await $.state.get(active)).value ?? null)
+    if (!p || e.props.hasSurvey || !(((await $.state.get(isTalk)).value ?? false))) return next(e)
     const { Box, Button, Text } = $.ui.resolve(e)
-    const speaking = await read($, isSpeaking)
-    const hearing = await read($, isListening)
-    const partial = await read($, heard)
-    const muted = await read($, isMuted)
-    const asked = await read($, question)
+    const speaking = ((await $.state.get(isSpeaking)).value ?? false)
+    const hearing = ((await $.state.get(isListening)).value ?? false)
+    const partial = ((await $.state.get(heard)).value ?? '')
+    const muted = ((await $.state.get(isMuted)).value ?? false)
+    const asked = ((await $.state.get(question)).value ?? null)
     const status = speaking
       ? `🔊 ${p.name} is speaking… talk over to interrupt`
       : e.props.isWorking
@@ -539,17 +552,17 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
-    const p = await read($, active)
-    if (!p || e.props.isDraft || e.props.isWorking || !(await read($, isTalk))) return next(e)
+    const p = ((await $.state.get(active)).value ?? null)
+    if (!p || e.props.isDraft || e.props.isWorking || !(((await $.state.get(isTalk)).value ?? false))) return next(e)
     return next({ ...e, props: { ...e.props, tail: ` · 🎙 talking with ${p.name}` } })
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Button, Text } = $.ui.resolve(e)
-    const list = await read($, roster)
-    const cur = await read($, active)
-    const muted = await read($, isMuted)
-    const talk = await read($, isTalk)
+    const list: Persona[] = (await $.state.get(roster)).value ?? []
+    const cur = ((await $.state.get(active)).value ?? null)
+    const muted = ((await $.state.get(isMuted)).value ?? false)
+    const talk = ((await $.state.get(isTalk)).value ?? false)
     return (
       <Box flexDirection="column">
         {list.slice(0, 9).map((p, i) => (
@@ -580,9 +593,9 @@ export const register: Register = (on, options) => {
   // the reply is spoken, then in talk mode the sidekick listens for what comes next
   on('turn.complete', async ($, e, next) => {
     if (!e.agentId) runningTurn = null
-    const p = await read($, active)
-    if (p && e.reason === 'answer' && !e.agentId && !(await read($, isMuted))) {
-      void say($, spoken(e.answer, await read($, isTalk)), p.voice)
+    const p = ((await $.state.get(active)).value ?? null)
+    if (p && e.reason === 'answer' && !e.agentId && !(((await $.state.get(isMuted)).value ?? false))) {
+      void say($, spoken(e.answer, ((await $.state.get(isTalk)).value ?? false)), p.voice)
     }
     return next(e)
   })

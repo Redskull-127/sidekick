@@ -44,7 +44,7 @@ macOS ships compact voices that sound robotic. Apple's natural **Premium** and *
 
 - Claude Code **2.1.287 or later** (tested on 2.1.289). Mods run in the terminal and the Desktop app's Code tab.
 - **Speech out** uses macOS `say`; on Linux and Windows replies stay text.
-- **Voice in** is a small native listener (`listener/listen.swift`, shipped as readable source) that uses macOS's own speech recognition, on-device where the language model is installed. It is compiled once on first use into `/var/tmp/sidekick/` with `swiftc`, which comes with the Xcode Command Line Tools (`xcode-select --install`). The first run asks for Microphone and Speech Recognition permission for your terminal. Nothing is sent to any third party; on-device recognition sends nothing anywhere.
+- **Voice in** is a small native listener (the Swift program in `hooks/listener-source.ts`) that uses macOS's own speech recognition, on-device where the language model is installed. It is written to `/var/tmp/sidekick/listen.swift` and compiled there once with `swiftc`, which comes with the Xcode Command Line Tools (`xcode-select --install`). The first run asks for Microphone and Speech Recognition permission for your terminal. Nothing is sent to any third party; on-device recognition sends nothing anywhere.
 - Prefer push-to-talk? Claude Code's own `/voice` dictation still works alongside; the sidekick speaks its replies either way.
 
 ## Install
@@ -65,18 +65,18 @@ Everything the plugin does is in its readable source. Spelled out, because a plu
 **Programs it starts, and why**
 - `say` speaks replies in the sidekick's voice; `killall say` cuts a reply short when you interrupt or press `s`.
 - `say -v ?` lists the voices you have, so a Premium or Enhanced one is used when installed.
-- `mkdir -p /var/tmp/sidekick` and `swiftc` once, to compile `listener/listen.swift` (the source in this repo) into `/var/tmp/sidekick/listen-<hash of the source>`.
-- That listener, while talk mode is on, to hear you through the microphone; `pkill -f` on it to stop listening.
+- `mkdir -p /var/tmp/sidekick` and `swiftc` once, to compile the listener source (`hooks/listener-source.ts` in this repo, written to `/var/tmp/sidekick/listen.swift`) into `/var/tmp/sidekick/listen`.
+- `/var/tmp/sidekick/listen`, while talk mode is on, to hear you through the microphone; `pkill -f /var/tmp/sidekick/listen` to stop listening.
 - `open x-apple.systempreferences:…SpokenContent` when you run `/sidekick voices install`, to show the voice download pane.
 
 **Files it writes**
-- The compiled listener in `/var/tmp/sidekick/`. Nothing in your project, nothing in your settings, no build or startup file.
+- In `/var/tmp/sidekick/` only: `listen.swift` and `Info.plist` (the listener's source, copied from this plugin), `listen` (its compiled binary) and `listen.version` (which source it was built from). Nothing in your project, nothing in your settings, no build or startup file.
 - Your sidekicks and preferences in Claude Code's plugin store (`~/.claude/plugins/store/`), through the mods API.
 
 **What it reads**
 - The transcript's final answer of each turn, to speak its first sentence or two.
 - Each AskUserQuestion call's questions, to read them aloud in talk mode.
-- Its own `listener/listen.swift`, to know whether the compiled copy is current.
+- `/var/tmp/sidekick/listen.version`, to know whether the compiled listener is current.
 
 **What it sends, and where**
 - `/sidekick new <description>`: that description goes to Claude (Haiku) through your own Claude Code account, to write the persona. Nothing else is ever sent to Claude by the plugin itself.
@@ -103,10 +103,10 @@ claude --plugin-dir .      # hot-reloads on save
 
 A mod cannot open a microphone itself, so the sidekick spawns the listener binary, over and over, for as long as talk mode is on. Each run records until you pause for 1.4 seconds (or 60 seconds at most), streams the partial transcript to the band, prints the final text, and exits. The mod submits that text as your prompt.
 
-The listener runs while the sidekick speaks too, so you can interrupt. Its own voice comes back through the microphone, so the mod drops the leading words that match what it was saying; the first two words that aren't its own cut the speech short. The listener captures through AVFoundation and picks the system's default microphone (`listener/listen.swift --list-devices` shows them; pass `--device <name part>` in `hooks/register.tsx` to pin one).
+The listener runs while the sidekick speaks too, so you can interrupt. Its own voice comes back through the microphone, so the mod drops the leading words that match what it was saying; the first two words that aren't its own cut the speech short. The listener captures through AVFoundation and picks the system's default microphone (`/var/tmp/sidekick/listen --list-devices` shows them once built; pass `--device <name part>` in `hooks/register.tsx` to pin one).
 
 ## Known limits
 
 - Echo is filtered by words, not by acoustics. Repeating the sidekick's own words back to it right after it says them won't register as a new prompt.
 - Languages: the listener uses your macOS locale. Pass `--lang` in `hooks/register.tsx` to pin one.
-- After editing `listener/listen.swift`, the binary rebuilds on next use (the build is keyed to a hash of the source). The chimes are synthesized in `hooks/chime.ts`.
+- After editing the Swift in `hooks/listener-source.ts`, the binary rebuilds on next use (the build is keyed to a hash of the source). The chimes are synthesized in `hooks/chime.ts`.

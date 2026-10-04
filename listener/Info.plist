@@ -1,8 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>CFBundleIdentifier</key><string>dev.meertarbani.sidekick.listen</string>
-  <key>CFBundleName</key><string>sidekick-listen</string>
-  <key>NSMicrophoneUsageDescription</key><string>Your sidekick listens for what you say.</string>
-  <key>NSSpeechRecognitionUsageDescription</key><string>Your sidekick turns what you say into text, on this Mac.</string>
-</dict></plist>

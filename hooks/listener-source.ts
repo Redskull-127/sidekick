@@ -1,3 +1,7 @@
+// The microphone listener, a small macOS program. The mod writes this text to /var/tmp/sidekick/listen.swift
+// and compiles it there once with swiftc; see "What it runs, stores, and sends" in the README.
+// String.raw keeps the backslashes Swift needs. Edit this like any Swift file.
+export const LISTENER_SWIFT = String.raw`
 // sidekick-listen: records from a microphone and prints what was said, using macOS's own speech
 // recognition (on-device where the language model is installed). Exits when the speaker pauses for
 // --silence seconds after speech began, or after --max seconds.
@@ -130,3 +134,16 @@ task.cancel()
 if transcript.isEmpty { exit(2) }
 print(transcript)
 exit(0)
+`
+
+/** Usage descriptions linked into the binary, so macOS can ask for the microphone and speech recognition. */
+export const LISTENER_PLIST = String.raw`
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>dev.meertarbani.sidekick.listen</string>
+  <key>CFBundleName</key><string>sidekick-listen</string>
+  <key>NSMicrophoneUsageDescription</key><string>Your sidekick listens for what you say.</string>
+  <key>NSSpeechRecognitionUsageDescription</key><string>Your sidekick turns what you say into text, on this Mac.</string>
+</dict></plist>
+`
