@@ -2,8 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Persona, SidekickQuestion } from '../types'
-import { CHIME_OFF, CHIME_ON } from './chimes'
-import { LISTENER_PLIST, LISTENER_SWIFT, LISTENER_VERSION } from './listener-src'
+import { CHIME_OFF, CHIME_ON } from './chime'
 import { GEN_SYSTEM, PRESETS, VOICES, askAloud, bestVoice, contract, foreignWords, hasNaturalVoice, parseGenerated, parseSayVoices, pickOption, spoken, stripEcho } from './persona'
 
 const PANE = 'sidekick'
@@ -121,19 +120,32 @@ async function hush($: EngineInterface) {
 
 // ── the listener: macOS speech recognition in a small native binary, built once ─────────────────
 
-/** Where the compiled listener lives, building it on first use; null when it cannot be built here. */
+/** A short stable hash of the listener's source, so a changed source gets a fresh build. */
+function sourceVersion(source: string): string {
+  let h = 5381
+  for (let i = 0; i < source.length; i++) h = ((h * 33) ^ source.charCodeAt(i)) >>> 0
+  return h.toString(16)
+}
+
+// where the compiled listener lives: a fixed folder, one binary per source version
+const LISTENER_DIR = '/var/tmp/sidekick'
+
+/** Where the compiled listener lives, building it on first use from listener/listen.swift; null when it cannot be built here. */
 async function listenerPath($: EngineInterface): Promise<string | null> {
-  const home = await $.env.get('HOME')
-  if (!home) return null
-  const dir = `${home}/.claude/plugins/data/sidekick`
-  const bin = `${dir}/listen-${LISTENER_VERSION}`
+  const source = `${$.plugin.root}/listener/listen.swift`
+  const plist = `${$.plugin.root}/listener/Info.plist`
+  let bin: string
+  try {
+    bin = `${LISTENER_DIR}/listen-${sourceVersion(await $.fs.read(source))}`
+  } catch {
+    return null
+  }
   if (await $.fs.exists(bin)) return bin
   $.ui.toast('Building the sidekick listener, one time, about 20 seconds…')
   try {
-    await $.fs.write(`${dir}/listen.swift`, LISTENER_SWIFT)
-    await $.fs.write(`${dir}/Info.plist`, LISTENER_PLIST)
+    await $.process.run(['mkdir', '-p', LISTENER_DIR])
     const built = await $.process.run(
-      ['swiftc', '-O', `${dir}/listen.swift`, '-o', bin, '-Xlinker', '-sectcreate', '-Xlinker', '__TEXT', '-Xlinker', '__info_plist', '-Xlinker', `${dir}/Info.plist`],
+      ['swiftc', '-O', source, '-o', bin, '-Xlinker', '-sectcreate', '-Xlinker', '__TEXT', '-Xlinker', '__info_plist', '-Xlinker', plist],
       { timeoutMs: 240_000 },
     )
     if (built.exitCode !== 0) {

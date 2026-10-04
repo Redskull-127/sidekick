@@ -3,7 +3,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import type { Persona } from '../types'
-import { CHIME_OFF, CHIME_ON } from '../hooks/chimes'
+import { CHIME_OFF, CHIME_ON } from '../hooks/chime'
 import { bestVoice, foreignWords, parseGenerated, parseSayVoices, pickOption, spoken, stripEcho } from '../hooks/persona'
 
 const USAGE = { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
@@ -61,7 +61,7 @@ function boot(on: On, seed: Record<string, unknown> = {}, sayVoices = 'Samantha 
     aborted.push(e.turnId)
     return { value: undefined }
   })
-  on('env.get', () => ({ value: '/Users/test' }))
+  on('fs.read', () => ({ value: 'swift source' }))
   on('fs.exists', () => ({ value: true }))
   on('prompt.submit', ($, e) => {
     submitted.push({ text: e.text, asUser: (e.origin as { asUser?: true }).asUser })

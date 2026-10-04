@@ -44,7 +44,7 @@ macOS ships compact voices that sound robotic. Apple's natural **Premium** and *
 
 - Claude Code **2.1.287 or later** (tested on 2.1.289). Mods run in the terminal and the Desktop app's Code tab.
 - **Speech out** uses macOS `say`; on Linux and Windows replies stay text.
-- **Voice in** is a small native listener (`listener/listen.swift`) that uses macOS's own speech recognition, on-device where the language model is installed. It is compiled once on first use into `~/.claude/plugins/data/sidekick/` with `swiftc`, which comes with the Xcode Command Line Tools (`xcode-select --install`). The first run asks for Microphone and Speech Recognition permission for your terminal. Nothing is sent to any third party; on-device recognition sends nothing anywhere.
+- **Voice in** is a small native listener (`listener/listen.swift`, shipped as readable source) that uses macOS's own speech recognition, on-device where the language model is installed. It is compiled once on first use into `/var/tmp/sidekick/` with `swiftc`, which comes with the Xcode Command Line Tools (`xcode-select --install`). The first run asks for Microphone and Speech Recognition permission for your terminal. Nothing is sent to any third party; on-device recognition sends nothing anywhere.
 - Prefer push-to-talk? Claude Code's own `/voice` dictation still works alongside; the sidekick speaks its replies either way.
 
 ## Install
@@ -60,12 +60,36 @@ Before installing any mod, you can list what it hooks and calls without running 
 
 ## What it runs, stores, and sends
 
-Everything the plugin does is in its readable source, in short:
+Everything the plugin does is in its readable source. Spelled out, because a plugin that listens and speaks should be:
 
-- **Runs on your Mac:** `say` (speech) and `killall say` (to cut it short); `say -v ?` (which voices you have); `swiftc` once, to compile `listener/listen.swift`; that listener while talk mode is on; `pkill` on it to stop listening; `open` on the System Settings pane when you ask for voices.
-- **Stores:** your sidekicks and settings in Claude Code's plugin store (`~/.claude/plugins/store/`), and the compiled listener in `~/.claude/plugins/data/sidekick/`.
-- **Sends:** the description you type after `/sidekick new` goes to Claude (Haiku) through your own Claude Code account to generate the persona. Your voice goes to Apple's speech recognition, on-device where the language model is installed, otherwise to Apple's servers, exactly as macOS dictation does. Nothing goes anywhere else. There is no telemetry.
-- **Where it works:** this plugin is a Claude Code mod, so it runs in the Claude Code terminal and the Desktop app's Code tab. Added from claude.ai it installs, but has nothing to do in chat or Cowork.
+**Programs it starts, and why**
+- `say` speaks replies in the sidekick's voice; `killall say` cuts a reply short when you interrupt or press `s`.
+- `say -v ?` lists the voices you have, so a Premium or Enhanced one is used when installed.
+- `mkdir -p /var/tmp/sidekick` and `swiftc` once, to compile `listener/listen.swift` (the source in this repo) into `/var/tmp/sidekick/listen-<hash of the source>`.
+- That listener, while talk mode is on, to hear you through the microphone; `pkill -f` on it to stop listening.
+- `open x-apple.systempreferences:…SpokenContent` when you run `/sidekick voices install`, to show the voice download pane.
+
+**Files it writes**
+- The compiled listener in `/var/tmp/sidekick/`. Nothing in your project, nothing in your settings, no build or startup file.
+- Your sidekicks and preferences in Claude Code's plugin store (`~/.claude/plugins/store/`), through the mods API.
+
+**What it reads**
+- The transcript's final answer of each turn, to speak its first sentence or two.
+- Each AskUserQuestion call's questions, to read them aloud in talk mode.
+- Its own `listener/listen.swift`, to know whether the compiled copy is current.
+
+**What it sends, and where**
+- `/sidekick new <description>`: that description goes to Claude (Haiku) through your own Claude Code account, to write the persona. Nothing else is ever sent to Claude by the plugin itself.
+- Your voice goes to Apple's speech recognition, on-device where the language model is installed, otherwise to Apple's servers, exactly as macOS dictation does. The plugin only sees the text that comes back.
+- **The prompts it submits are exactly the words you spoke**, as transcribed, sent as your own message. It never composes a prompt of its own.
+- Nothing goes anywhere else. No telemetry, no analytics, no network calls of its own.
+
+**Where it steps in**
+- It adds one section to the system prompt: the active persona and the rules above (ask promptly, keep it short). That is all it changes about what Claude reads.
+- In talk mode it answers the **AskUserQuestion** tool in the dialog's place when it understood your spoken answer; otherwise the normal dialog opens.
+- "Stop" or "wait" spoken in talk mode cancels the running turn. Nothing else touches tool calls or permissions.
+
+**Where it works**: this plugin is a Claude Code mod, so it runs in the Claude Code terminal and the Desktop app's Code tab. Added from claude.ai it installs, but has nothing to do in chat or Cowork.
 
 ## Develop
 
@@ -85,4 +109,4 @@ The listener runs while the sidekick speaks too, so you can interrupt. Its own v
 
 - Echo is filtered by words, not by acoustics. Repeating the sidekick's own words back to it right after it says them won't register as a new prompt.
 - Languages: the listener uses your macOS locale. Pass `--lang` in `hooks/register.tsx` to pin one.
-- After editing `listener/listen.swift`, run `python3 scripts/embed-listener.py`; the binary rebuilds on next use. After changing a chime, run `python3 scripts/make-chimes.py`.
+- After editing `listener/listen.swift`, the binary rebuilds on next use (the build is keyed to a hash of the source). The chimes are synthesized in `hooks/chime.ts`.

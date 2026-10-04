@@ -6,6 +6,7 @@
   "homepage": "https://github.com/Redskull-127/sidekick",
   "repository": "https://github.com/Redskull-127/sidekick",
   "license": "MIT",
+  "icon": "./.claude-plugin/icon.png",
   "keywords": ["persona", "voice", "companion", "agent", "mod"],
   "types": "./types/index.d.ts",
   "userConfig": {
