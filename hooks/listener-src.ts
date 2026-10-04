@@ -1,4 +1,4 @@
-// Generated from bin/listen.swift and bin/Info.plist by scripts/embed-listener.py. Do not edit by hand.
+// Generated from listener/listen.swift and listener/Info.plist by scripts/embed-listener.py. Do not edit by hand.
 /** Changes whenever the listener's source changes, so a stale binary is rebuilt. */
 export const LISTENER_VERSION = "4d8ed096acbb"
 

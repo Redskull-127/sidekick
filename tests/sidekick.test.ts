@@ -3,6 +3,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import type { Persona } from '../types'
+import { CHIME_OFF, CHIME_ON } from '../hooks/chimes'
 import { bestVoice, foreignWords, parseGenerated, parseSayVoices, pickOption, spoken, stripEcho } from '../hooks/persona'
 
 const USAGE = { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
@@ -50,7 +51,7 @@ function boot(on: On, seed: Record<string, unknown> = {}, sayVoices = 'Samantha 
   on('ui.render', () => ({ type: 'Text', props: {}, children: ['drawn by Claude Code'] }))
   const plays: string[] = []
   on('audio.play', ($, e) => {
-    plays.push(e.clip.asset ?? '')
+    plays.push(e.clip.base64 === CHIME_ON ? 'chime' : e.clip.base64 === CHIME_OFF ? 'chime-off' : 'other')
     return { value: undefined }
   })
   on('session.start', () => ({ cwd: '/work' }))
@@ -138,7 +139,7 @@ test('/sidekick new creates a persona, activates it and chimes', async ($, on) =
   expect(roster.map(p => p.id)).toEqual(['ada', 'rudy', 'nova'])
   expect(saved.get('active')).toBe('nova')
   await settle(() => plays.length > 0)
-  expect(plays).toEqual(['sounds/chime.wav'])
+  expect(plays).toEqual(['chime'])
   expect(spokenTexts).toEqual([])
 })
 
@@ -168,7 +169,7 @@ test('talk mode: chime, you speak, it sends; its echo is ignored; you talk over 
   const answer = await run($, 'talk')
   expect(answer.text).toContain('Talk mode on')
   await settle(() => spawnCount() === 1 && plays.length === 1)
-  expect(plays).toEqual(['sounds/chime.wav'])
+  expect(plays).toEqual(['chime'])
   expect(spokenTexts).toEqual([])
 
   hear('refactor the auth middleware')
@@ -191,13 +192,13 @@ test('talk mode: chime, you speak, it sends; its echo is ignored; you talk over 
   expect(runs).toContain('killall say')
   expect(submitted[1]?.text).toBe('what about the docs')
   // cut off, so no "your turn" chime
-  expect(plays).toEqual(['sounds/chime.wav'])
+  expect(plays).toEqual(['chime'])
 
   // "end talk" by voice: the lower chime, no speech
   await settle(() => spawnCount() === 4)
   hear('okay end talk please')
   await settle(() => plays.length === 2)
-  expect(plays[1]).toBe('sounds/chime-off.wav')
+  expect(plays[1]).toBe('chime-off')
   await settle(() => false)
   expect(spokenTexts.length).toBe(1)
   expect(submitted.length).toBe(2)
@@ -217,7 +218,7 @@ test('a reply that finishes unhurried is followed by the "your turn" chime, and 
   await settle(() => false)
   finishSpeech()
   await settle(() => plays.length === 2)
-  expect(plays).toEqual(['sounds/chime.wav', 'sounds/chime.wav'])
+  expect(plays).toEqual(['chime', 'chime'])
 
   // the recognizer reports what it heard of the speech only after the speaker went quiet
   hear('all done night')
@@ -274,7 +275,7 @@ test('pressing talk again and again toggles; it never stacks greetings or listen
   await pane.press({ key: 'talk' })
   await settle(() => spawnCount() === 2)
   // on, off, on: chime, off-chime, chime; nothing spoken; one listener alive
-  expect(plays).toEqual(['sounds/chime.wav', 'sounds/chime-off.wav', 'sounds/chime.wav'])
+  expect(plays).toEqual(['chime', 'chime-off', 'chime'])
   expect(spokenTexts).toEqual([])
   expect(spawnCount()).toBe(2)
   await pane.press({ key: 'talk' })

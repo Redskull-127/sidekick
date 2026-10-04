@@ -2,6 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Persona, SidekickQuestion } from '../types'
+import { CHIME_OFF, CHIME_ON } from './chimes'
 import { LISTENER_PLIST, LISTENER_SWIFT, LISTENER_VERSION } from './listener-src'
 import { GEN_SYSTEM, PRESETS, VOICES, askAloud, bestVoice, contract, foreignWords, hasNaturalVoice, parseGenerated, parseSayVoices, pickOption, spoken, stripEcho } from './persona'
 
@@ -110,7 +111,7 @@ async function say($: EngineInterface, text: string, voice: string) {
 
 /** The cabin chime: "a sidekick is on" and "your turn"; the lower one when talk mode ends. */
 const chime = ($: EngineInterface, kind: 'on' | 'off' = 'on') =>
-  $.audio.play({ asset: kind === 'off' ? 'sounds/chime-off.wav' : 'sounds/chime.wav' }).catch(() => {})
+  $.audio.play({ base64: kind === 'off' ? CHIME_OFF : CHIME_ON, mime: 'audio/wav' }).catch(() => {})
 
 // ponytail: `say` has no abort; killing the macOS synthesizer is the one-line skip
 async function hush($: EngineInterface) {
